@@ -5,6 +5,7 @@ import rl "vendor:raylib"
 import sa "core:container/small_array"
 import math "core:math"
 import linalg "core:math/linalg"
+import rand "core:math/rand"
 
 pr :: fmt.println
 Vec2 :: rl.Vector2
@@ -20,14 +21,12 @@ FIXED_DT :: 1 / PHYSICS_HZ
 
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
+SMALL_ASTEROID_RADIUS :: 10
 
 SHIP_R :: 15
-SHIP_ROTATION_MAGNITUDE :: 6
+SHIP_ROTATION_MAGNITUDE :: 3
 THRUST_MAGNITUDE :: 10
 SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
-BASE_BRAKING_COEFFICIENT :: 0.01
-MIN_SPEED_THRESHOLD :: 350
-MAX_BRAKING_EFFECT :: 0.08
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
@@ -41,7 +40,7 @@ Entity_Id :: distinct u32
 Entity_Manager :: struct {
 	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id), // len used as active_entity_count, order doesn't align with components
 	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
-	types: [MAX_ENTITIES]Entity_Type,
+	types: [MAX_ENTITIES]Entity_Type, // CSDR moving this under gameplay or other?? the data flow (set/get) is disjointed
 	entity_to_index: map[Entity_Id]int,
 
     // TODO: CSDR moving to a Component_Manager
@@ -90,6 +89,12 @@ Render_Type :: enum {
 	Particle,
 }
 
+Asteroid_Kind :: enum {
+    Small,
+    Medium,
+    Large,
+}
+
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
@@ -107,11 +112,11 @@ ui_camera :: proc() -> rl.Camera2D {
 }
 
 update :: proc() {
-    dt := rl.GetFrameTime()
-    update_entities(g_mem.manager, dt)
 	if rl.IsKeyPressed(.ESCAPE) {
 		g_mem.run = false
 	}
+    dt := rl.GetFrameTime()
+    update_entities(g_mem.manager, dt)
 }
 
 draw :: proc() {
@@ -180,10 +185,11 @@ game_init :: proc() {
 		manager = manager,
 	}
 
-	player_id := create_entity(g_mem.manager, .Ship)
+	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
+    pr("init player_id", player_id)
 
-    create_entity(g_mem.manager, .Asteroid)
+    spawn_asteroid(.Small, {0, -100}, {0, -100}, g_mem.manager)
 
 	game_hot_reloaded(g_mem)
 	pr_span("END game_init")
@@ -282,13 +288,14 @@ generate_entity_id :: proc(manager: Entity_Manager) -> Entity_Id {
     return Entity_Id(get_active_entity_count(manager))
 }
 
+// CSDR return false for failure
 create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id {
 	pr_span("IN create_entity")
 
     index := get_active_entity_count(manager^)
 	if index > MAX_ENTITIES {
 		log_warn("Failed to create entity, max entities reached")
-        return 0
+        return 99999
 	}
 
     // Get ID from free list or create new
@@ -299,25 +306,11 @@ create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id 
         id = generate_entity_id(manager^)
     }
     sa.append(&manager.entities, id)
-
+    set_entity_type(manager, index, type)
     manager.entity_to_index[id] = index
-
-    // initialize / spawn
-    switch type {
-    case .Ship:
-        init_ship(manager, id, index)
-    case .Asteroid:
-        init_asteroid(manager, id, index)
-    case .Bullet:
-        // init_bullet(manager, entity_id, index)
-    case .None:
-    }
-
     return id
 }
-
-Entity_Data :: struct {
-    type: Entity_Type,
+Component_Data :: struct {
     position: Maybe(Vec2),
     velocity: Maybe(Vec2),
     rotation: Maybe(f32),
@@ -335,8 +328,7 @@ Entity_Data :: struct {
     is_visible: Maybe(bool),
 }
 
-Entity_Request_Data :: struct {
-    type: bool,
+Component_Request_Data :: struct {
     position: bool,
     velocity: bool,
     rotation: bool,
@@ -354,57 +346,65 @@ Entity_Request_Data :: struct {
     scale: bool,
 }
 
-get_entity_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Entity_Request_Data) -> (Entity_Data, bool) {
+get_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Component_Request_Data) -> (Component_Data, bool) {
     index, ok := manager.entity_to_index[id]
 
     if !ok do return {}, false
 
-    data: Entity_Data
-    switch {
-    case request.type == true:
-        data.type = get_entity_type(manager, index)
-    case request.position == true:
+    data: Component_Data
+    // case request.type == true:
+    //     data.type = get_entity_type(manager, index)
+    if request.position {
         data.position = get_position(manager, index)
-    case request.velocity == true:
+    }
+    if request.velocity {
         data.velocity = get_velocity(manager, index)
-    case request.rotation == true:
+    }
+    if request.rotation {
         data.rotation = get_rotation(manager, index)
-    case request.mass == true:
+    }
+    if request.mass {
         data.mass = get_mass(manager, index)
-    case request.radius_physics == true:
+    }
+    if request.radius_physics {
         data.radius_physics = get_radius_physics(manager, index)
-    case request.damage == true:
+    }
+    if request.damage {
         data.damage = get_damage(manager, index)
-    case request.health == true:
+    }
+    if request.health {
         data.health = get_health(manager, index)
-    case request.lifespan == true:
+    }
+    if request.lifespan {
         data.lifespan = get_lifespan(manager, index)
-    case request.render_type == true:
+    }
+    if request.render_type {
         data.render_type = get_render_type(manager, index)
-    case request.radius_render == true:
+    }
+    if request.radius_render {
         data.radius_render = get_radius_render(manager, index)
-    case request.color == true:
+    }
+    if request.color {
         data.color = get_color(manager, index)
-    case request.scale == true:
+    }
+    if request.scale {
         data.scale = get_scale(manager, index)
-    case request.visual_rotation_rate == true:
+    }
+    if request.visual_rotation_rate {
         data.visual_rotation_rate = get_visual_rotation_rate(manager, index)
-    case request.is_visible == true:
+    }
+    if request.is_visible {
         data.is_visible = get_is_visible(manager, index)
     }
     return data, true
 }
 
-set_entity_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Entity_Data) -> bool {
+set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Component_Data) -> bool {
     idx, ok_idx := manager.entity_to_index[id]
 
     if !ok_idx do return false
 
-    if data.type == .None {
-        log_warn("Failed to create entity, entity_type == None")
-        return false
-    }
-    set_entity_type(manager, idx, data.type)
+    // set_entity_type(manager, idx, data.type)
     if val, ok := data.position.?; ok {
         set_position(manager, idx, val)
     }
@@ -457,11 +457,11 @@ set_entity_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Entity_Da
     return true
 }
 
-_pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Data, Entity_Id) {
-    last_entity := sa.pop_back(&manager.entities)
+_pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Type, Component_Data, Entity_Id, int) {
     last_index := get_last_entity_index(manager^)
-    data := Entity_Data{
-        type = manager.types[last_index],
+    type := get_entity_type(manager, last_index)
+    last_id := sa.pop_back(&manager.entities)
+    data := Component_Data{
         position = manager.positions[last_index],
         velocity = manager.velocities[last_index],
         rotation = manager.rotations[last_index],
@@ -478,26 +478,28 @@ _pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Data, Entity_Id) {
         is_visible = manager.is_visibles[last_index],
         render_type = manager.rendering.types_render[last_index],
     }
-    return data, last_entity
+    return type, data, last_id, last_index
 }
 
-destroy_entity :: proc(manager: ^Entity_Manager, id: Entity_Id) {
-    index, ok := manager.entity_to_index[id]
-
-    if !ok do return
-
-    // Get the last active entity. active_count--
-    data, last_entity := _pop_back_entity(manager)
-
-    // Swap if entity_destroyed isn't last entity
-    if index != sa.len(manager.entities) - 1 {
-        set_entity_data(manager, id, data)
+destroy_entity :: proc(manager: ^Entity_Manager, id_to_destroy: Entity_Id) {
+    index_to_swap, ok := manager.entity_to_index[id_to_destroy]
+    if !ok {
+        log_warn("Failed to destroy entity, missing index from entity_to_index")
+         return
     }
-    manager.entity_to_index[last_entity] = index
+    // Get the last active entity. active_count--
+    type, swap_data, last_id, last_index_before_pop := _pop_back_entity(manager)
 
-    sa.append(&manager.free_list, id)
+    // Swap components only if entity_destroyed isn't last entity
+    if index_to_swap != last_index_before_pop {
+        set_entity_type(manager, index_to_swap, type)
+        set_component_data(manager, id_to_destroy, swap_data)
+    }
+    sa.set(&manager.entities, index_to_swap, last_id)
+    manager.entity_to_index[last_id] = index_to_swap
 
-    delete_key(&manager.entity_to_index, id)
+    sa.append(&manager.free_list, id_to_destroy)
+    delete_key(&manager.entity_to_index, id_to_destroy)
 }
 
 update_ship :: proc(manager: ^Entity_Manager, index: int) {
@@ -512,6 +514,9 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
         d_rot = SHIP_ROTATION_MAGNITUDE
     }
+    if rl.IsKeyPressed(.SPACE) {
+        spawn_bullet_from_ship(manager)
+    }
 
     is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
 
@@ -523,13 +528,15 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     vel_space_friction_term : Vec2 = vel * SPACE_FRICTION_COEFFICIENT
 
     speed := linalg.length(vel)
-    braking_factor : f32 = 0
-    if speed > 0 {
-        braking_factor = min(BASE_BRAKING_COEFFICIENT * (MIN_SPEED_THRESHOLD / (speed + 10)), MAX_BRAKING_EFFECT)
+    if !is_thrusting && speed > 0 && speed < 30 {
+        braking_factor := 1 / (speed + 10)
+        vel -= vel * braking_factor
+        if linalg.length(vel) < 1 {
+            vel = 0
+        }
     }
-    vel_braking_friction_term := vel * braking_factor
 
-    vel += vel_thrust_term - vel_space_friction_term - vel_braking_friction_term
+    vel += vel_thrust_term - vel_space_friction_term
     pos += vel * dt
 
     set_rotation(manager, index, rot)
@@ -538,25 +545,58 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
+    // pr("entities:",sa.slice(&manager.entities)[:(sa.len(manager.entities))])
+    // pr("entity_to_idx:",manager.entity_to_index)
+    // pr("free_list:",sa.slice(&manager.free_list)[:(sa.len(manager.free_list))])
+    // pr_span("")
+    entities_to_destroy: [dynamic]int
+    defer delete(entities_to_destroy)
+
 	for index in 0..<get_active_entity_count(manager^) {
         entity_type := get_entity_type(manager, index)
         switch entity_type {
 		case .Ship:
             update_ship(manager, index)
 		case .Asteroid:
-            visual_rotation_rate := get_visual_rotation_rate(manager, index)
+            vel := get_velocity(manager, index)
+            pos := get_position(manager, index)
+            set_position(manager, index, pos + vel * dt)
             rot := get_rotation(manager, index)
+            visual_rotation_rate := get_visual_rotation_rate(manager, index)
             set_rotation(manager, index, rot + visual_rotation_rate)
 		case .Bullet:
-			// lifespan := sa.get(manager.gameplay.lifespans, i)
-			// new_lifespan := lifespan - dt
-			// sa.set(&manager.gameplay.lifespans, i, new_lifespan)
-			// if sa.get(manager.gameplay.lifespans, i) <= 0 {
-			// 	destroy_entity(manager, sa.get(manager.entities, i))
-			// }
+            vel := get_velocity(manager, index)
+            pos := get_position(manager, index)
+            set_position(manager, index, pos + vel * dt)
+
+            lifespan := get_lifespan(manager, index)
+            lifespan -= dt
+			if lifespan <= 0 {
+                append(&entities_to_destroy, index)
+			} else {
+                set_lifespan(manager, index, lifespan)
+            }
         case .None:
 		}
+        pos := get_position(manager, index)
+        if pos.x <= f32(screen_edge_left()) {
+            set_position(manager, index, {f32(screen_edge_right() - 1), pos.y})
+        } else if pos.x >= f32(screen_edge_right()) {
+            set_position(manager, index, {f32(screen_edge_left() + 1), pos.y})
+        }
+        if pos.y <= f32(screen_edge_top()) {
+            set_position(manager, index, {pos.x, f32(screen_edge_bottom() - 1)})
+        } else if pos.y >= f32(screen_edge_bottom()) {
+            set_position(manager, index, {pos.x, f32(screen_edge_top() + 1)})
+        }
 	}
+
+    for index in entities_to_destroy {
+        pr("index to destroy", index)
+        id := sa.get(manager.entities, index)
+        pr("id to destroy", id)
+        destroy_entity(manager, id)
+    }
 }
 
 get_entity_type :: proc(manager: ^Entity_Manager, idx: int) -> Entity_Type {
@@ -698,7 +738,7 @@ draw_debug_ui :: proc() {
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
@@ -709,6 +749,9 @@ draw_debug_ui :: proc() {
                 vel,
                 speed,
                 get_health(g_mem.manager, 0),
+                get_active_entity_count(g_mem.manager^),
+                sa.slice(&g_mem.entities)[:sa.len(g_mem.entities)],
+                sa.slice(&g_mem.free_list)[:sa.len(g_mem.free_list)],
             ),
             3, 3, 12, rl.WHITE,
         )
@@ -720,7 +763,7 @@ draw_debug_ui :: proc() {
                 screen_left(),
                 screen_right(),
             ),
-            3, 150, 12, rl.WHITE,
+            i32(rl.GetScreenWidth() - 300), 3, 12, rl.WHITE,
         )
     }
 }
@@ -729,10 +772,10 @@ get_player_id :: proc() -> Entity_Id {
 	return g_mem.player_id
 }
 
-player_idx :: proc() -> int {
-	idx, ok := g_mem.manager.entity_to_index[g_mem.player_id]
+player_index :: proc() -> int {
+	index, ok := g_mem.manager.entity_to_index[g_mem.player_id]
 	if ok {
-		return idx
+		return index
 	}
 	log_warn("Player entity id not in entity_to_index map")
 	return -1
@@ -759,9 +802,8 @@ log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
 	fmt.printfln("[%v]WARN: %v", loc, msg.? or_else "")
 }
 
-init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
-    position := Vec2{0,0}
-    rotation : f32 = math.to_radians(f32(0))
+spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
+    id := create_entity(manager, .Ship)
 
     tail_angle := math.to_radians(f32(45))
     vertices: Render_Vertices_Component
@@ -770,10 +812,9 @@ init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
     vertices[2] =  Vec2{-SHIP_R*0.25, 0}
     vertices[3] =  Vec2{-SHIP_R*math.cos(tail_angle), SHIP_R*math.sin(tail_angle)}
 
-    set_entity_data(manager, id, Entity_Data{
-        type = .Ship,
-        position = position,
-        rotation = rotation,
+    set_component_data(manager, id, Component_Data{
+        position = pos,
+        rotation = rot,
         velocity = Vec2{0, 0},
         radius_physics = SHIP_R,
         render_type = Render_Type.Ship,
@@ -784,22 +825,78 @@ init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
         is_visible = true,
         vertices = vertices,
     })
+    return id
 }
 
-init_asteroid :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
-    RADIUS :: 25
-    data_in := Entity_Data{
-        type = .Asteroid,
-        position = Vec2{250,250},
-        velocity = Vec2{-25, -45},
-        radius_physics = RADIUS,
+spawn_asteroid :: proc(kind: Asteroid_Kind, pos: Vec2, vel: Vec2, manager: ^Entity_Manager) {
+    id := create_entity(manager, .Asteroid)
+    visual_rotation_rate := rand.float32_range(0.1, 1.5)
+    radius: f32
+    switch kind {
+    case .Small:
+        radius = SMALL_ASTEROID_RADIUS
+    case .Medium:
+        radius = SMALL_ASTEROID_RADIUS * 1.5
+    case .Large:
+        radius = SMALL_ASTEROID_RADIUS * 2.5
+    }
+    data_in := Component_Data{
+        position = pos,
+        velocity = vel,
+        radius_physics = radius,
         render_type = Render_Type.Asteroid,
         color = rl.GRAY,
-        radius_render = RADIUS,
-        visual_rotation_rate = .8,
+        radius_render = radius,
+        visual_rotation_rate = visual_rotation_rate,
         health = 3,
         is_visible = true,
     }
-    set_entity_data(manager, id, data_in)
+    set_component_data(manager, id, data_in)
 }
 
+spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
+    id := create_entity(manager, .Bullet)
+    BULLET_SPEED :: 700
+    ship_data, ship_ok := get_component_data(manager, get_player_id(), Component_Request_Data{
+        rotation = true,
+        position = true,
+    })
+    if !ship_ok {
+        log_warn("Failed to spawn bullet because ship data nil")
+        destroy_entity(manager, id)
+        return
+    }
+
+    ship_rotation, ok_rotation := ship_data.rotation.?
+    if !ok_rotation {
+        log_warn("Failed to spawn bullet because ship rotation nil")
+        destroy_entity(manager, id)
+        return
+    }
+    rotation_vector := angle_radians_to_vec(ship_rotation)
+
+    ship_position, ok_position := ship_data.position.?
+    if !ok_position {
+        log_warn("Failed to spawn bullet because ship position nil")
+        destroy_entity(manager, id)
+        return
+    }
+
+    pos := ship_position + rotation_vector * SHIP_R
+    velocity := rotation_vector * BULLET_SPEED
+
+    data_in := Component_Data{
+        position = pos,
+        velocity = velocity,
+        damage = 1,
+        is_visible = true,
+        color = rl.RED,
+        render_type = Render_Type.Bullet,
+        lifespan = 1,
+    }
+    set_component_data(manager, id, data_in)
+}
+
+angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
+    return Vec2{math.cos(rot), math.sin(rot)}
+}
