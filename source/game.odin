@@ -9,15 +9,25 @@ import linalg "core:math/linalg"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-WINDOW_W :: 1920
-WINDOW_H :: 1080
+DEBUG :: true
+WINDOW_W :: 1800
+WINDOW_H :: 1000
 LOGICAL_W :: 1000
 LOGICAL_H :: 1000
+
 PHYSICS_HZ :: 120
-DEBUG :: true
 FIXED_DT :: 1 / PHYSICS_HZ
+
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
+
+SHIP_R :: 15
+SHIP_ROTATION_MAGNITUDE :: 6
+THRUST_MAGNITUDE :: 10
+SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
+BASE_BRAKING_COEFFICIENT :: 0.01
+MIN_SPEED_THRESHOLD :: 350
+MAX_BRAKING_EFFECT :: 0.08
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
@@ -109,6 +119,7 @@ draw :: proc() {
 	rl.ClearBackground(rl.BLACK)
 
 	rl.BeginMode2D(game_camera())
+    draw_screen_edges()
 	draw_entities(g_mem.manager) 
 	rl.EndMode2D()
 
@@ -117,6 +128,22 @@ draw :: proc() {
 	rl.EndMode2D()
 
 	rl.EndDrawing()
+}
+screen_edge_left :: proc() -> i32 {
+    return i32(screen_left() + 1)
+}
+screen_edge_top :: proc() -> i32 {
+    return i32(screen_top() + 1)
+}
+screen_edge_right :: proc() -> i32 {
+    return i32(screen_edge_left() + LOGICAL_W - 2)
+}
+screen_edge_bottom :: proc() -> i32 {
+    return i32(screen_edge_top() + LOGICAL_H - 2)
+}
+
+draw_screen_edges :: proc() {
+    rl.DrawRectangleLines(screen_edge_left(), screen_edge_top(), LOGICAL_W - 2, LOGICAL_H - 2, rl.BLUE)
 }
 
 @(export)
@@ -130,7 +157,7 @@ game_init_window :: proc() {
     // .Borderlesswindowedmode, .fullscreen_mode, window_maximized
 	rl.SetConfigFlags({.VSYNC_HINT,  .WINDOW_RESIZABLE, .WINDOW_MAXIMIZED})
 	rl.InitWindow(WINDOW_W, WINDOW_H, "Kaivalya")
-	rl.SetWindowPosition(0, 85)
+	rl.SetWindowPosition(50, 150)
 	rl.SetTargetFPS(60)
 	rl.SetExitKey(nil)
 }
@@ -162,6 +189,14 @@ game_init :: proc() {
 	pr_span("END game_init")
 }
 
+
+// Here you can also set your own global variables. A good idea is to make
+// your global variables into pointers that point to something inside
+// `g_mem`.
+@(export)
+game_hot_reloaded :: proc(mem: rawptr) { 
+    g_mem = (^Game_Memory)(mem) 
+}
 @(export)
 game_should_run :: proc() -> bool {
 	when ODIN_OS != .JS {
@@ -170,48 +205,20 @@ game_should_run :: proc() -> bool {
 			return false
 		}
 	}
-
 	return g_mem.run
 }
-
 @(export)
-game_shutdown :: proc() {
-	free(g_mem)
-}
-
+game_shutdown :: proc() { free(g_mem) }
 @(export)
-game_shutdown_window :: proc() {
-	rl.CloseWindow()
-}
-
+game_shutdown_window :: proc() { rl.CloseWindow() }
 @(export)
-game_memory :: proc() -> rawptr {
-	return g_mem
-}
-
+game_memory :: proc() -> rawptr { return g_mem }
 @(export)
-game_memory_size :: proc() -> int {
-	return size_of(Game_Memory)
-}
-
+game_memory_size :: proc() -> int { return size_of(Game_Memory) }
 @(export)
-game_hot_reloaded :: proc(mem: rawptr) {
-	g_mem = (^Game_Memory)(mem)
-
-	// Here you can also set your own global variables. A good idea is to make
-	// your global variables into pointers that point to something inside
-	// `g_mem`.
-}
-
+game_force_reload :: proc() -> bool { return rl.IsKeyPressed(.F6) || rl.IsKeyPressed(.R) }
 @(export)
-game_force_reload :: proc() -> bool {
-	return rl.IsKeyPressed(.F6) || rl.IsKeyPressed(.R)
-}
-
-@(export)
-game_force_restart :: proc() -> bool {
-	return rl.IsKeyPressed(.F7)
-}
+game_force_restart :: proc() -> bool { return rl.IsKeyPressed(.F7) }
 
 // In a web build, this is called when browser changes size. Remove the
 // `rl.SetWindowSize` call if you don't want a resizable game.
@@ -250,7 +257,7 @@ draw_ship :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, colo
         rl.DrawLineV(vertices[i], vertices[i+1], color)
     }
     rl.DrawLineV(vertices[3], vertices[0], color)
-    rl.DrawPixelV(pos, rl.RED)
+    if DEBUG do rl.DrawPixelV(pos, rl.RED)
 }
 
 rotate_point :: proc(point: Vec2, center: Vec2, rot: f32 /* rad */) -> Vec2 {
@@ -493,13 +500,6 @@ destroy_entity :: proc(manager: ^Entity_Manager, id: Entity_Id) {
     delete_key(&manager.entity_to_index, id)
 }
 
-SHIP_ROTATION_MAGNITUDE :: 6
-THRUST_MAGNITUDE :: 10
-SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
-BASE_BRAKING_COEFFICIENT :: 0.01
-MIN_SPEED_THRESHOLD :: 350
-MAX_BRAKING_EFFECT :: 0.08
-
 update_ship :: proc(manager: ^Entity_Manager, index: int) {
     rot := get_rotation(manager, index)
     pos := get_position(manager, index)
@@ -739,16 +739,16 @@ player_idx :: proc() -> int {
 }
 
 screen_left :: proc() -> f32 {
-	return game_camera().target.x + game_camera().offset.x
+	return -LOGICAL_W / 2
 }
 screen_right :: proc() -> f32 {
-	return game_camera().target.x + game_camera().offset.x + LOGICAL_W,
+	return LOGICAL_W / 2
 }
 screen_top :: proc() -> f32 {
-	return 0
+	return -LOGICAL_H / 2
 }
 screen_bottom :: proc() -> f32 {
-	return LOGICAL_H
+	return LOGICAL_H / 2
 }
 
 pr_span :: proc(msg: Maybe(string)) {
@@ -760,26 +760,25 @@ log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
 }
 
 init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
-    R :: 20
     position := Vec2{0,0}
     rotation : f32 = math.to_radians(f32(0))
 
     tail_angle := math.to_radians(f32(45))
     vertices: Render_Vertices_Component
-    vertices[0] = Vec2{R, 0}
-    vertices[1] =  Vec2{-R*math.cos(tail_angle), -R*math.sin(tail_angle)}
-    vertices[2] =  Vec2{-R*0.25, 0}
-    vertices[3] =  Vec2{-R*math.cos(tail_angle), R*math.sin(tail_angle)}
+    vertices[0] = Vec2{SHIP_R, 0}
+    vertices[1] =  Vec2{-SHIP_R*math.cos(tail_angle), -SHIP_R*math.sin(tail_angle)}
+    vertices[2] =  Vec2{-SHIP_R*0.25, 0}
+    vertices[3] =  Vec2{-SHIP_R*math.cos(tail_angle), SHIP_R*math.sin(tail_angle)}
 
     set_entity_data(manager, id, Entity_Data{
         type = .Ship,
         position = position,
         rotation = rotation,
         velocity = Vec2{0, 0},
-        radius_physics = R,
+        radius_physics = SHIP_R,
         render_type = Render_Type.Ship,
         color = rl.GREEN,
-        radius_render = R,
+        radius_render = SHIP_R,
         damage = 1,
         health = 5,
         is_visible = true,
