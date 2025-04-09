@@ -1,13 +1,12 @@
 package game
 
 import "core:fmt"
-import linalg "core:math/linalg"
 import rl "vendor:raylib"
 import sa "core:container/small_array"
+import math "core:math"
 
 pr :: fmt.println
 Vec2 :: rl.Vector2
-
 
 WINDOW_W :: 1920
 WINDOW_H :: 1080
@@ -17,6 +16,7 @@ PHYSICS_HZ :: 120
 DEBUG :: true
 FIXED_DT :: 1 / PHYSICS_HZ
 MAX_ENTITIES :: 128
+N_ASTEROID_SIDES :: 8
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
@@ -25,29 +25,51 @@ Game_Memory :: struct {
 }
 g_mem: ^Game_Memory
 
+Entity_Id :: distinct u32
+
+Entity_Manager :: struct {
+	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id), // len used as active_entity_count, order doesn't align with components
+	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
+	types: [MAX_ENTITIES]Entity_Type,
+	entity_to_index: map[Entity_Id]int,
+
+    // TODO: CSDR moving to a Component_Manager
+	using physics: ^Physics_Data,
+	using rendering: ^Rendering_Data,
+	using gameplay: ^Gameplay_Data,
+}
+
+Entity_Type :: enum { 
+    None,
+    Ship, 
+    Asteroid, 
+    Bullet, 
+}
+
 Physics_Data :: struct {
-	positions: sa.Small_Array(MAX_ENTITIES, Vec2),
-	velocities: sa.Small_Array(MAX_ENTITIES, Vec2),
-	rotations: sa.Small_Array(MAX_ENTITIES, f32),
-	masses: sa.Small_Array(MAX_ENTITIES, f32),
-	radii: sa.Small_Array(MAX_ENTITIES, f32),
+	positions: [MAX_ENTITIES]Vec2,
+	velocities: [MAX_ENTITIES]Vec2,
+	rotations: [MAX_ENTITIES]f32,
+	masses: [MAX_ENTITIES]f32,
+	radii_physics: [MAX_ENTITIES]f32,
 }
 
 Gameplay_Data :: struct {
-	lifespans: sa.Small_Array(MAX_ENTITIES, f32),
-	damages: sa.Small_Array(MAX_ENTITIES, i32),
-	healths: sa.Small_Array(MAX_ENTITIES, i32),
+    damages: [MAX_ENTITIES]i32,
+    healths: [MAX_ENTITIES]i32,
+	lifespans: [MAX_ENTITIES]f32,
 }
 
+MAX_RENDER_VERTICES :: 8
+Render_Vertices_Component :: [MAX_RENDER_VERTICES]Vec2
 Rendering_Data :: struct {
-	// models: []Model,
-	types: sa.Small_Array(MAX_ENTITIES, Render_Type),
-	vertices: sa.Small_Array(MAX_ENTITIES, []Vec2),
-	radii: sa.Small_Array(MAX_ENTITIES, f32),
-	colors: sa.Small_Array(MAX_ENTITIES, rl.Color),
-	rotation_offsets: sa.Small_Array(MAX_ENTITIES, f32), // asteroid visual rotation
-	is_visible: sa.Small_Array(MAX_ENTITIES, bool),
-	scales: sa.Small_Array(MAX_ENTITIES, f32),
+	types_render: [MAX_ENTITIES]Render_Type,
+	vertices: [MAX_ENTITIES]Render_Vertices_Component,
+	radii_render: [MAX_ENTITIES]f32,
+	colors: [MAX_ENTITIES]rl.Color,
+	visual_rotation_rates: [MAX_ENTITIES]f32, // asteroid visual rotation
+	is_visibles: [MAX_ENTITIES]bool,
+	scales: [MAX_ENTITIES]f32,
 }
 
 Render_Type :: enum {
@@ -57,29 +79,12 @@ Render_Type :: enum {
 	Particle,
 }
 
-Entity_Id :: distinct u32
-
-Entity_Manager :: struct {
-	active_count: int,
-	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id),
-	entity_to_index: map[Entity_Id]int,
-	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
-	types: sa.Small_Array(MAX_ENTITIES, Entity_Type),
-
-	physics: ^Physics_Data,
-	rendering: ^Rendering_Data,
-	gameplay: ^Gameplay_Data,
-}
-
-Entity_Type :: enum { Ship, Asteroid, Bullet, }
-
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
 
 	return {
 		zoom = h/LOGICAL_H,
-		// target = g_mem.player_pos,
 		offset = { w/2, h/2 },
 	}
 }
@@ -103,7 +108,7 @@ draw :: proc() {
 	rl.ClearBackground(rl.BLACK)
 
 	rl.BeginMode2D(game_camera())
-	draw_entities(g_mem.physics, g_mem.rendering) 
+	draw_entities(g_mem.manager) 
 	rl.EndMode2D()
 
 	rl.BeginMode2D(ui_camera())
@@ -148,7 +153,7 @@ game_init :: proc() {
 	}
 
 	player_id := create_entity(g_mem.manager, .Ship)
-	g_mem.player_id = player_id
+    g_mem.player_id = player_id
 
     create_entity(g_mem.manager, .Asteroid)
 
@@ -213,259 +218,462 @@ game_parent_window_size_changed :: proc(w, h: int) {
 	rl.SetWindowSize(i32(w), i32(h))
 }
 
-draw_entities :: proc(physics: ^Physics_Data, rendering: ^Rendering_Data) {
-    for i := 0; i < sa.len(rendering.types); i += 1 {
-        if !sa.get(rendering.is_visible, i) do continue
+draw_entities :: proc(manager: ^Entity_Manager) {
+    for index in 0..<get_active_entity_count(manager^) {
+        if !manager.is_visibles[index] do continue
 
-        // Get the entity's position and rotation from physics
-        pos := sa.get(physics.positions, i)
-        rot := sa.get(physics.rotations, i)
+        pos := get_position(manager, index)
+        rot := get_rotation(manager, index)
+        color := get_color(manager, index)
 
-        // Draw based on render type
-        switch sa.get(rendering.types, i) {
+        switch get_render_type(manager, index) {
         case .Ship:
-            draw_ship(pos, rot, sa.get(rendering.vertices, i), sa.get(rendering.colors, i))
+            draw_ship(pos, rot, get_vertices(manager,index), color)
         case .Asteroid:
-            radius := sa.get(rendering.radii, i)
-            draw_asteroid(pos, rot, radius, sa.get(rendering.colors, i))
+            radius := get_radius_physics(manager, index)
+            draw_asteroid(pos, rot, radius, get_color(manager, index))
         case .Bullet:
-            rl.DrawCircleV(pos, 2.0, sa.get(rendering.colors, i))
+            rl.DrawCircleV(pos, 2.0, color)
         case .Particle:
-            rl.DrawCircleV(pos, 1.0, sa.get(rendering.colors, i))
+            rl.DrawCircleV(pos, 1.0, color)
         }
     }
 }
 
-draw_ship :: proc(pos: rl.Vector2, rot: f32, vertices: []rl.Vector2, color: rl.Color) {
-	rl.DrawCircleV(pos, 15, rl.GREEN)
-  // // Apply rotation and translation to vertices
-  // transformed_vertices := make([]rl.Vector2, len(vertices))
-  // defer delete(transformed_vertices)
-  //
-  // for i := 0; i < len(vertices); i += 1 {
-  //   // Rotate and translate vertices
-  //   transformed_vertices[i] = rotate_point(vertices[i], rot)
-  //   transformed_vertices[i] = {
-  //     transformed_vertices[i].x + pos.x,
-  //     transformed_vertices[i].y + pos.y,
-  //   }
-  // }
-  //
-  // // TODO
-  // // rl.DrawTriangleLines()
-  // // define a center to rotate around, transform vertices
-  // //////////////////////////
-  //
-  // // Draw lines between vertices
-  // for i := 0; i < len(transformed_vertices)-1; i += 1 {
-  //   rl.DrawLineV(transformed_vertices[i], transformed_vertices[i+1], color)
-  // }
-  // // Connect last vertex to first
-  // rl.DrawLineV(transformed_vertices[len(transformed_vertices)-1], transformed_vertices[0], color)
+draw_ship :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color) {
+    vertices := vertices
+    for &vertex in vertices {
+        vertex = rotate_point(vertex, {0, 0}, rot) + pos
+    }
+    for i in 0..<3 {
+        rl.DrawLineV(vertices[i], vertices[i+1], color)
+    }
+    rl.DrawLineV(vertices[3], vertices[0], color)
+    rl.DrawPixelV(pos, rl.RED)
 }
 
-append_zero_value_all_components :: proc(manager: ^Entity_Manager) {
-    sa.append(&manager.physics.positions, Vec2{})
-    sa.append(&manager.physics.velocities, Vec2{})
-    sa.append(&manager.physics.rotations, 0)
-    sa.append(&manager.physics.masses, 0)
-    sa.append(&manager.physics.radii, 0)
+rotate_point :: proc(point: Vec2, center: Vec2, rot: f32 /* rad */) -> Vec2 {
+    delta := point - center
+    // TODO: work on this, flipped in between sign
+    point_rotated := Vec2{
+        delta.x * math.cos(rot) - delta.y * math.sin(rot) + center.x,
+        delta.x * math.sin(rot) + delta.y * math.cos(rot) + center.y,
+    }
+    return point_rotated
+}
 
-    sa.append(&manager.gameplay.lifespans, 0)
-    sa.append(&manager.gameplay.damages, 0)
-    sa.append(&manager.gameplay.healths, 0)
+get_last_entity_index :: proc(manager: Entity_Manager) -> int {
+    return sa.len(manager.entities) - 1
+}
 
-    sa.append(&manager.rendering.types, Render_Type.Ship)
-    sa.append(&manager.rendering.vertices, nil)
-    sa.append(&manager.rendering.colors, rl.WHITE)
-    sa.append(&manager.rendering.rotation_offsets, 0)
-    sa.append(&manager.rendering.is_visible, true)
-    sa.append(&manager.rendering.scales, 1)
+get_active_entity_count :: proc(manager: Entity_Manager) -> int {
+    return sa.len(manager.entities)
+}
+
+generate_entity_id :: proc(manager: Entity_Manager) -> Entity_Id {
+    return Entity_Id(get_active_entity_count(manager))
 }
 
 create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id {
 	pr_span("IN create_entity")
-    entity_id: Entity_Id
-    
-    // Get ID from free list or create new
-    if sa.len(manager.free_list) > 0 {
-        entity_id = sa.pop_back(&manager.free_list)
-    } else {
-        entity_id = Entity_Id(sa.len(manager.entities))
-        sa.append(&manager.entities, entity_id)
-        append_zero_value_all_components(manager)
-    }
-    
-    index := manager.active_count
+
+    index := get_active_entity_count(manager^)
 	if index > MAX_ENTITIES {
-		log_warn("Cannot create entity, max entities reached")
+		log_warn("Failed to create entity, max entities reached")
+        return 0
 	}
-    manager.entity_to_index[entity_id] = index
-    manager.active_count += 1
-    
-    // Set entity type
-	sa.set(&manager.types, index, type)
-    
-    // Initialize based on type
+
+    // Get ID from free list or create new
+    id: Entity_Id
+    if sa.len(manager.free_list) > 0 {
+        id = sa.pop_back(&manager.free_list)
+    } else {
+        id = generate_entity_id(manager^)
+    }
+    sa.append(&manager.entities, id)
+
+    manager.entity_to_index[id] = index
+
+    // initialize / spawn
     switch type {
     case .Ship:
-        init_ship(manager, entity_id, index)
+        init_ship(manager, id, index)
     case .Asteroid:
-        init_asteroid(manager, entity_id, index)
+        init_asteroid(manager, id, index)
     case .Bullet:
         // init_bullet(manager, entity_id, index)
+    case .None:
     }
-    
-    return entity_id
+
+    return id
 }
 
-log_warn :: proc(msg: string, loc := #caller_location) {
-	fmt.printfln("[%v]WARN: %v", loc, msg)
+Entity_Data :: struct {
+    type: Entity_Type,
+    position: Maybe(Vec2),
+    velocity: Maybe(Vec2),
+    rotation: Maybe(f32),
+    mass: Maybe(f32),
+    radius_physics: Maybe(f32),
+    damage: Maybe(i32),
+    health: Maybe(i32),
+    lifespan: Maybe(f32),
+    render_type: Maybe(Render_Type),
+    radius_render: Maybe(f32),
+    color: Maybe(rl.Color),
+    scale: Maybe(f32),
+    vertices: Maybe(Render_Vertices_Component),
+    visual_rotation_rate: Maybe(f32),
+    is_visible: Maybe(bool),
 }
 
-init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
-	pr("IN init_ship")
-
-// Physics_Data :: struct {
-// 	positions: [dynamic]Vec2,
-// 	velocities: [dynamic]Vec2,
-// 	rotations: [dynamic]f32,
-// 	masses: [dynamic]f32,
-// 	radii: [dynamic]f32,
-// }
-//
-// Gameplay_Data :: struct {
-// 	lifespan: [dynamic]f32,
-// 	damage: [dynamic]i32,
-// 	health: [dynamic]i32,
-// }
-//
-// Rendering_Data :: struct {
-// 	// models: []Model,
-// 	types: [dynamic]Render_Type,
-// 	vertices: [dynamic][]Vec2,
-// 	colors: [dynamic]rl.Color,
-// 	rotation_offsets: [dynamic]f32, // asteroid visual rotation
-// 	is_visible: [dynamic]bool,
-// 	scales: [dynamic]f32,
-// }
+Entity_Request_Data :: struct {
+    type: bool,
+    position: bool,
+    velocity: bool,
+    rotation: bool,
+    mass: bool,
+    radius_physics: bool,
+    damage: bool,
+    health: bool,
+    lifespan: bool,
+    render_type: bool,
+    vertices: bool,
+    radius_render: bool,
+    color: bool,
+    visual_rotation_rate: bool,
+    is_visible: bool,
+    scale: bool,
 }
 
-init_asteroid :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
-	pr_span("IN init_asteroid")
-    radius :: 25
-    sa.set(&manager.physics.positions, index,Vec2{ 250, 250})
-    sa.set(&manager.physics.rotations, index,0)
-    sa.set(&manager.physics.radii, index, radius)
-    sa.set(&manager.rendering.types, index, Render_Type.Asteroid)
-    sa.set(&manager.rendering.colors, index, rl.GRAY)
-    sa.set(&manager.rendering.radii, index, radius)
-    sa.set(&manager.rendering.rotation_offsets, index, .8)
-    sa.set(&manager.gameplay.healths, index, 3)
-// Physics_Data :: struct {
-// 	positions: [dynamic]Vec2,
-// 	velocities: [dynamic]Vec2,
-// 	rotations: [dynamic]f32,
-// 	masses: [dynamic]f32,
-// 	radii: [dynamic]f32,
-// }
-//
-// Gameplay_Data :: struct {
-// 	lifespan: [dynamic]f32,
-// 	damage: [dynamic]i32,
-// 	health: [dynamic]i32,
-// }
-//
-// Rendering_Data :: struct {
-// 	// models: []Model,
-// 	types: [dynamic]Render_Type,
-// 	vertices: [dynamic][]Vec2,
-//  radii:
-// 	colors: [dynamic]rl.Color,
-// 	rotation_offsets: [dynamic]f32, // asteroid visual rotation
-// 	is_visible: [dynamic]bool,
-// 	scales: [dynamic]f32,
-// }
+get_entity_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Entity_Request_Data) -> (Entity_Data, bool) {
+    index, ok := manager.entity_to_index[id]
 
+    if !ok do return {}, false
+
+    data: Entity_Data
+    switch {
+    case request.type == true:
+        data.type = get_entity_type(manager, index)
+    case request.position == true:
+        data.position = get_position(manager, index)
+    case request.velocity == true:
+        data.velocity = get_velocity(manager, index)
+    case request.rotation == true:
+        data.rotation = get_rotation(manager, index)
+    case request.mass == true:
+        data.mass = get_mass(manager, index)
+    case request.radius_physics == true:
+        data.radius_physics = get_radius_physics(manager, index)
+    case request.damage == true:
+        data.damage = get_damage(manager, index)
+    case request.health == true:
+        data.health = get_health(manager, index)
+    case request.lifespan == true:
+        data.lifespan = get_lifespan(manager, index)
+    case request.render_type == true:
+        data.render_type = get_render_type(manager, index)
+    case request.radius_render == true:
+        data.radius_render = get_radius_render(manager, index)
+    case request.color == true:
+        data.color = get_color(manager, index)
+    case request.scale == true:
+        data.scale = get_scale(manager, index)
+    case request.visual_rotation_rate == true:
+        data.visual_rotation_rate = get_visual_rotation_rate(manager, index)
+    case request.is_visible == true:
+        data.is_visible = get_is_visible(manager, index)
+    }
+    return data, true
 }
 
-// Remove an entity
-destroy_entity :: proc(manager: ^Entity_Manager, entity: Entity_Id) {
-    index, ok := manager.entity_to_index[entity]
+set_entity_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Entity_Data) -> bool {
+    idx, ok_idx := manager.entity_to_index[id]
+
+    if !ok_idx do return false
+
+    if data.type == .None {
+        log_warn("Failed to create entity, entity_type == None")
+        return false
+    }
+    set_entity_type(manager, idx, data.type)
+    if val, ok := data.position.?; ok {
+        set_position(manager, idx, val)
+    }
+    if val, ok := data.velocity.?; ok {
+        set_velocity(manager, idx, val)
+    }
+    if val, ok := data.radius_physics.?; ok {
+        set_radius_physics(manager, idx, val)
+    }
+    if val, ok := data.rotation.?; ok {
+        set_rotation(manager, idx, val)
+    }
+    if val, ok := data.mass.?; ok {
+        set_mass(manager, idx, val)
+    }
+    if val, ok := data.lifespan.?; ok {
+        set_lifespan(manager, idx, val)
+    }
+    if val, ok := data.damage.?; ok {
+        set_damage(manager, idx, val)
+    }
+    if val, ok := data.health.?; ok {
+        set_health(manager, idx, val)
+    }
+    if val, ok := data.render_type.?; ok {
+        set_render_type(manager, idx, val)
+    }
+    if val, ok := data.vertices.?; ok {
+        set_vertices(manager, idx, val)
+    }
+    if val, ok := data.radius_render.?; ok {
+        set_radius_render(manager, idx, val)
+    }
+    if val, ok := data.color.?; ok {
+        set_color(manager, idx, val)
+    }
+    if val, ok := data.visual_rotation_rate.?; ok {
+        set_visual_rotation_rate(manager, idx, val)
+    }
+    if val, ok := data.is_visible.?; ok {
+        set_is_visible(manager, idx, val)
+    } else {
+        set_is_visible(manager, idx, true)
+    }
+    if val, ok := data.scale.?; ok {
+        set_scale(manager, idx, val)
+    } else {
+        set_scale(manager, idx, 1)
+    }
+    return true
+}
+
+_pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Data, Entity_Id) {
+    last_entity := sa.pop_back(&manager.entities)
+    last_index := get_last_entity_index(manager^)
+    data := Entity_Data{
+        type = manager.types[last_index],
+        position = manager.positions[last_index],
+        velocity = manager.velocities[last_index],
+        rotation = manager.rotations[last_index],
+        mass = manager.masses[last_index],
+        radius_physics = manager.radii_physics[last_index],
+        damage = manager.damages[last_index],
+        health = manager.healths[last_index],
+        lifespan = manager.lifespans[last_index],
+        radius_render = manager.radii_render[last_index],
+        color = manager.colors[last_index],
+        scale = manager.scales[last_index],
+        vertices = manager.vertices[last_index],
+        visual_rotation_rate = manager.visual_rotation_rates[last_index],
+        is_visible = manager.is_visibles[last_index],
+        render_type = manager.rendering.types_render[last_index],
+    }
+    return data, last_entity
+}
+
+destroy_entity :: proc(manager: ^Entity_Manager, id: Entity_Id) {
+    index, ok := manager.entity_to_index[id]
+
     if !ok do return
-    
-    // Get the last active entity
-    last_index := manager.active_count - 1
-    last_entity := sa.get(manager.entities, last_index)
-    
-    // Move the last entity to the position of the removed entity
-    if index != last_index {
-        // Swap component data
-		last_position := sa.get(manager.physics.positions, last_index)
-        sa.set(&manager.physics.positions, index, last_position)
 
-		last_rendering_type := sa.get(manager.rendering.types, last_index)
-        sa.set(&manager.rendering.types, index, last_rendering_type)
+    // Get the last active entity. active_count--
+    data, last_entity := _pop_back_entity(manager)
 
-        // TODO: etc. for all components
-        
-        // Update index lookup
-        manager.entity_to_index[last_entity] = index
+    // Swap if entity_destroyed isn't last entity
+    if index != sa.len(manager.entities) - 1 {
+        set_entity_data(manager, id, data)
     }
-    
-    // Decrement active count
-    manager.active_count -= 1
-    
-    // Add to free list for recycling
-    sa.append(&manager.free_list, entity)
-    
-    // Remove from lookup
-    delete_key(&manager.entity_to_index, entity)
+    manager.entity_to_index[last_entity] = index
+
+    sa.append(&manager.free_list, id)
+
+    delete_key(&manager.entity_to_index, id)
+}
+
+update_ship :: proc(manager: ^Entity_Manager, index: int) {
+    pos := get_position(manager, index)
+    rot := get_rotation(manager, index)
+
+    thrust_dir :i32= 0
+    dt := rl.GetFrameTime()
+
+    d_rot: f32
+    if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
+        d_rot = -6 * dt
+    }
+    if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
+        d_rot = 6 * dt
+    }
+
+    if rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) {
+        thrust_dir = 1
+    }
+    if rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S) {
+        thrust_dir = -1
+    }
+
+    rot += d_rot
+    facing := Vec2{math.cos(rot), math.sin(rot)}
+    pos += (f32(thrust_dir) * dt * 300) * facing
+    set_position(manager, index, pos)
+    set_rotation(manager, index, rot)
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
-	for i := 0; i < manager.active_count; i += 1 {
-		switch sa.get(manager.types, i) {
+	for index in 0..<get_active_entity_count(manager^) {
+        entity_type := get_entity_type(manager, index)
+        switch entity_type {
 		case .Ship:
-            input: rl.Vector2
-            if rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) {
-                input.y -= 1
-            }
-            if rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S) {
-                input.y += 1
-            }
-            if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
-                input.x -= 1
-            }
-            if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
-                input.x += 1
-            }
-
-            input = linalg.normalize0(input)
-            pos := sa.get(manager.physics.positions, i)
-            sa.set(&manager.physics.positions, i, pos + input*10)
-			// update_ship(manager, i, dt)
+            update_ship(manager, index)
 		case .Asteroid:
-			// update_asteroid(manager, i, dt)
-            rotation_offset := sa.get(manager.rendering.rotation_offsets, i)
-            rot := sa.get(manager.physics.rotations, i)
-            sa.set(&manager.physics.rotations, i, rot + rotation_offset)
+            visual_rotation_rate := get_visual_rotation_rate(manager, index)
+            rot := get_rotation(manager, index)
+            set_rotation(manager, index, rot + visual_rotation_rate)
 		case .Bullet:
-			// update_bullet(manager, i, dt)
-
-			lifespan := sa.get(manager.gameplay.lifespans, i)
-			new_lifespan := lifespan - dt
-			sa.set(&manager.gameplay.lifespans, i, new_lifespan)
-			if sa.get(manager.gameplay.lifespans, i) <= 0 {
-				destroy_entity(manager, sa.get(manager.entities, i))
-			}
+			// lifespan := sa.get(manager.gameplay.lifespans, i)
+			// new_lifespan := lifespan - dt
+			// sa.set(&manager.gameplay.lifespans, i, new_lifespan)
+			// if sa.get(manager.gameplay.lifespans, i) <= 0 {
+			// 	destroy_entity(manager, sa.get(manager.entities, i))
+			// }
+        case .None:
 		}
 	}
 }
 
+get_entity_type :: proc(manager: ^Entity_Manager, idx: int) -> Entity_Type {
+    return manager.types[idx]
+}
+
+set_entity_type :: proc(manager: ^Entity_Manager, idx: int, type: Entity_Type) {
+    manager.types[idx] = type
+}
+
+get_position :: proc(manager: ^Entity_Manager, idx: int) -> Vec2 {
+    return manager.positions[idx]
+}
+
+set_position :: proc(manager: ^Entity_Manager, idx: int, pos: Vec2) {
+    manager.positions[idx] = pos
+}
+
+get_velocity :: proc(manager: ^Entity_Manager, idx: int) -> Vec2 {
+    return manager.velocities[idx]
+}
+
+set_velocity :: proc(manager: ^Entity_Manager, idx: int, vel: Vec2) {
+    manager.velocities[idx] = vel
+}
+
+get_rotation :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.rotations[idx]
+}
+
+set_rotation :: proc(manager: ^Entity_Manager, idx: int, rot: f32) {
+    manager.rotations[idx] = rot
+}
+
+get_mass :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.masses[idx]
+}
+
+set_mass :: proc(manager: ^Entity_Manager, idx: int, mass: f32) {
+    manager.masses[idx] = mass
+}
+
+get_radius_physics :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.radii_physics[idx]
+}
+
+set_radius_physics :: proc(manager: ^Entity_Manager, idx: int, radius: f32) {
+    manager.radii_physics[idx] = radius
+}
+
+get_lifespan :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.lifespans[idx]
+}
+
+set_lifespan :: proc(manager: ^Entity_Manager, idx: int, radius: f32) {
+    manager.lifespans[idx] = radius
+}
+
+get_health :: proc(manager: ^Entity_Manager, idx: int) -> i32 {
+    return manager.gameplay.healths[idx]
+}
+
+set_health :: proc(manager: ^Entity_Manager, idx: int, health: i32) {
+    manager.gameplay.healths[idx] =  health
+}
+
+get_damage :: proc(manager: ^Entity_Manager, idx: int) -> i32 {
+    return manager.gameplay.damages[idx]
+}
+
+set_damage :: proc(manager: ^Entity_Manager, idx: int, damage: i32) {
+    manager.gameplay.damages[idx] = damage
+}
+
+get_render_type :: proc(manager: ^Entity_Manager, idx: int) -> Render_Type {
+    return manager.types_render[idx]
+}
+
+set_render_type :: proc(manager: ^Entity_Manager, idx: int, render_type: Render_Type) {
+    manager.types_render[idx] = render_type
+}
+
+get_vertices :: proc(manager: ^Entity_Manager, idx: int) -> Render_Vertices_Component {
+    return manager.rendering.vertices[idx]
+}
+
+set_vertices :: proc(manager: ^Entity_Manager, idx: int, vertices: Render_Vertices_Component) {
+    // TODO: check this works, ship is appending more vertices
+    manager.rendering.vertices[idx] = vertices
+}
+
+get_radius_render :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.radii_render[idx]
+}
+
+set_radius_render :: proc(manager: ^Entity_Manager, idx: int, radius: f32) {
+    manager.radii_render[idx] = radius
+}
+
+get_color :: proc(manager: ^Entity_Manager, idx: int) -> rl.Color {
+    return manager.colors[idx]
+}
+
+set_color :: proc(manager: ^Entity_Manager, idx: int, color: rl.Color) {
+    manager.colors[idx] = color
+}
+
+get_visual_rotation_rate :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.visual_rotation_rates[idx]
+}
+
+set_visual_rotation_rate :: proc(manager: ^Entity_Manager, idx: int, visual_rotation_rate: f32) {
+    manager.visual_rotation_rates[idx] = visual_rotation_rate
+}
+
+get_is_visible :: proc(manager: ^Entity_Manager, idx: int) -> bool {
+    return manager.is_visibles[idx]
+}
+
+set_is_visible :: proc(manager: ^Entity_Manager, idx: int, is_visibile: bool) {
+    manager.is_visibles[idx] = is_visibile
+}
+
+get_scale :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
+    return manager.scales[idx]
+}
+
+set_scale :: proc(manager: ^Entity_Manager, idx: int, scale: f32) {
+    manager.scales[idx] = scale
+}
+
 draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
-	// rl.DrawCircleV(pos, radius, color)
-    rl.DrawPolyLines(pos, 5, radius, rot,  color)
+    rl.DrawPolyLines(pos, N_ASTEROID_SIDES, radius, rot,  color)
 }
 
 draw_debug_ui :: proc() {
@@ -479,11 +687,11 @@ draw_debug_ui :: proc() {
                 LOGICAL_H,
                 LOGICAL_W,
                 rl.GetTime(),
-                sa.get(g_mem.physics.positions, 0),
-                sa.get(g_mem.physics.velocities, 0),
-				sa.get(g_mem.gameplay.healths, 0),
+                get_position(g_mem.manager, 0),
+                get_velocity(g_mem.manager, 0),
+                get_health(g_mem.manager, 0),
             ),
-            3, 3, 16, rl.WHITE,
+            3, 3, 12, rl.WHITE,
         )
         rl.DrawText(
             fmt.ctprintf(
@@ -493,7 +701,7 @@ draw_debug_ui :: proc() {
                 screen_left(),
                 screen_right(),
             ),
-            3, 150, 16, rl.WHITE,
+            3, 150, 12, rl.WHITE,
         )
     }
 }
@@ -524,6 +732,56 @@ screen_bottom :: proc() -> f32 {
 	return LOGICAL_H
 }
 
-pr_span :: proc(msg: string) {
-    pr("-----------------------", msg, "-----------------------")
+pr_span :: proc(msg: Maybe(string)) {
+    pr("-----------------------", msg.? or_else "", "-----------------------")
 }
+
+log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
+	fmt.printfln("[%v]WARN: %v", loc, msg.? or_else "")
+}
+
+init_ship :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
+    R :: 20
+    position := Vec2{0,0}
+    rotation : f32 = math.to_radians(f32(0))
+
+    tail_angle := math.to_radians(f32(45))
+    vertices: Render_Vertices_Component
+    vertices[0] = Vec2{R, 0}
+    vertices[1] =  Vec2{-R*math.cos(tail_angle), -R*math.sin(tail_angle)}
+    vertices[2] =  Vec2{-R*0.25, 0}
+    vertices[3] =  Vec2{-R*math.cos(tail_angle), R*math.sin(tail_angle)}
+
+    set_entity_data(manager, id, Entity_Data{
+        type = .Ship,
+        position = position,
+        rotation = rotation,
+        velocity = Vec2{0, 0},
+        radius_physics = R,
+        render_type = Render_Type.Ship,
+        color = rl.GREEN,
+        radius_render = R,
+        damage = 1,
+        health = 5,
+        is_visible = true,
+        vertices = vertices,
+    })
+}
+
+init_asteroid :: proc(manager: ^Entity_Manager, id: Entity_Id, index: int) {
+    RADIUS :: 25
+    data_in := Entity_Data{
+        type = .Asteroid,
+        position = Vec2{250,250},
+        velocity = Vec2{-25, -45},
+        radius_physics = RADIUS,
+        render_type = Render_Type.Asteroid,
+        color = rl.GRAY,
+        radius_render = RADIUS,
+        visual_rotation_rate = .8,
+        health = 3,
+        is_visible = true,
+    }
+    set_entity_data(manager, id, data_in)
+}
+
