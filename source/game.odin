@@ -4,6 +4,7 @@ import "core:fmt"
 import rl "vendor:raylib"
 import sa "core:container/small_array"
 import math "core:math"
+import linalg "core:math/linalg"
 
 pr :: fmt.println
 Vec2 :: rl.Vector2
@@ -492,33 +493,48 @@ destroy_entity :: proc(manager: ^Entity_Manager, id: Entity_Id) {
     delete_key(&manager.entity_to_index, id)
 }
 
-update_ship :: proc(manager: ^Entity_Manager, index: int) {
-    pos := get_position(manager, index)
-    rot := get_rotation(manager, index)
+SHIP_ROTATION_MAGNITUDE :: 6
+THRUST_MAGNITUDE :: 10
+SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
+BASE_BRAKING_COEFFICIENT :: 0.01
+MIN_SPEED_THRESHOLD :: 350
+MAX_BRAKING_EFFECT :: 0.08
 
-    thrust_dir :i32= 0
-    dt := rl.GetFrameTime()
+update_ship :: proc(manager: ^Entity_Manager, index: int) {
+    rot := get_rotation(manager, index)
+    pos := get_position(manager, index)
+    vel := get_velocity(manager, index)
 
     d_rot: f32
     if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
-        d_rot = -6 * dt
+        d_rot = -SHIP_ROTATION_MAGNITUDE
     }
     if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
-        d_rot = 6 * dt
+        d_rot = SHIP_ROTATION_MAGNITUDE
     }
 
-    if rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) {
-        thrust_dir = 1
-    }
-    if rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S) {
-        thrust_dir = -1
-    }
+    is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
 
-    rot += d_rot
-    facing := Vec2{math.cos(rot), math.sin(rot)}
-    pos += (f32(thrust_dir) * dt * 300) * facing
-    set_position(manager, index, pos)
+    dt := rl.GetFrameTime()
+    rot += d_rot * dt
+    heading : Vec2 = {math.cos(rot), math.sin(rot)} // aka facing, not ship velocity nor direction of movement of body
+
+    vel_thrust_term : Vec2 = is_thrusting ? THRUST_MAGNITUDE * heading : 0
+    vel_space_friction_term : Vec2 = vel * SPACE_FRICTION_COEFFICIENT
+
+    speed := linalg.length(vel)
+    braking_factor : f32 = 0
+    if speed > 0 {
+        braking_factor = min(BASE_BRAKING_COEFFICIENT * (MIN_SPEED_THRESHOLD / (speed + 10)), MAX_BRAKING_EFFECT)
+    }
+    vel_braking_friction_term := vel * braking_factor
+
+    vel += vel_thrust_term - vel_space_friction_term - vel_braking_friction_term
+    pos += vel * dt
+
     set_rotation(manager, index, rot)
+    set_position(manager, index, pos)
+    set_velocity(manager, index, vel)
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
@@ -677,10 +693,12 @@ draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
 }
 
 draw_debug_ui :: proc() {
+    vel := get_velocity(g_mem.manager, 0)
+    speed := linalg.length(vel)
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nhp: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
@@ -688,7 +706,8 @@ draw_debug_ui :: proc() {
                 LOGICAL_W,
                 rl.GetTime(),
                 get_position(g_mem.manager, 0),
-                get_velocity(g_mem.manager, 0),
+                vel,
+                speed,
                 get_health(g_mem.manager, 0),
             ),
             3, 3, 12, rl.WHITE,
