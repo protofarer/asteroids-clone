@@ -187,7 +187,6 @@ game_init :: proc() {
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
-    pr("init player_id", player_id)
 
     spawn_asteroid(.Small, {0, -100}, {0, -100}, g_mem.manager)
 
@@ -247,7 +246,7 @@ draw_entities :: proc(manager: ^Entity_Manager) {
             radius := get_radius_physics(manager, index)
             draw_asteroid(pos, rot, radius, get_color(manager, index))
         case .Bullet:
-            rl.DrawCircleV(pos, 2.0, color)
+            rl.DrawRectangle(i32(pos.x), i32(pos.y), 2, 2, color)
         case .Particle:
             rl.DrawCircleV(pos, 1.0, color)
         }
@@ -288,9 +287,8 @@ generate_entity_id :: proc(manager: Entity_Manager) -> Entity_Id {
     return Entity_Id(get_active_entity_count(manager))
 }
 
-// CSDR return false for failure
 create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id {
-	pr_span("IN create_entity")
+	// pr_span("IN create_entity")
 
     index := get_active_entity_count(manager^)
 	if index > MAX_ENTITIES {
@@ -590,11 +588,8 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             set_position(manager, index, {pos.x, f32(screen_edge_top() + 1)})
         }
 	}
-
     for index in entities_to_destroy {
-        pr("index to destroy", index)
         id := sa.get(manager.entities, index)
-        pr("id to destroy", id)
         destroy_entity(manager, id)
     }
 }
