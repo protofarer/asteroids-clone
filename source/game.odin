@@ -28,12 +28,26 @@ SHIP_ROTATION_MAGNITUDE :: 3
 THRUST_MAGNITUDE :: 10
 SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
 
+BULLET_SPEED :: 600
+
 Game_Memory :: struct {
 	player_id: Entity_Id,
 	run: bool,
 	using manager: ^Entity_Manager,
+    sounds: [Sound_Kind]rl.Sound,
 }
+
 g_mem: ^Game_Memory
+sounds: ^[Sound_Kind]rl.Sound
+entity_m: ^Entity_Manager
+
+Sound_Kind :: enum {
+    Fire,
+    Harm,
+    Score,
+    Bullet_Impact,
+    Thrust,
+}
 
 Entity_Id :: distinct u32
 
@@ -116,7 +130,7 @@ update :: proc() {
 		g_mem.run = false
 	}
     dt := rl.GetFrameTime()
-    update_entities(g_mem.manager, dt)
+    update_entities(entity_m, dt)
 }
 
 draw :: proc() {
@@ -125,7 +139,7 @@ draw :: proc() {
 
 	rl.BeginMode2D(game_camera())
     draw_screen_edges()
-	draw_entities(g_mem.manager) 
+	draw_entities(entity_m) 
 	rl.EndMode2D()
 
 	rl.BeginMode2D(ui_camera())
@@ -165,6 +179,7 @@ game_init_window :: proc() {
 	rl.SetWindowPosition(50, 150)
 	rl.SetTargetFPS(60)
 	rl.SetExitKey(nil)
+    rl.InitAudioDevice()
 }
 
 @(export)
@@ -174,16 +189,20 @@ game_init :: proc() {
 
 	manager := new(Entity_Manager)
 	physics := new(Physics_Data)
-	manager.physics = physics
 	rendering := new(Rendering_Data)
-	manager.rendering = rendering
 	gameplay := new(Gameplay_Data)
+	manager.physics = physics
+	manager.rendering = rendering
 	manager.gameplay = gameplay
 
-	g_mem^ = Game_Memory {
-		run = true,
-		manager = manager,
-	}
+    for sound_kind in Sound_Kind {
+        g_mem.sounds[sound_kind] = load_sound_from_kind(sound_kind)
+    }
+    g_mem.manager = manager
+	g_mem.run = true
+
+    sounds = &g_mem.sounds
+    entity_m = g_mem.manager
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
@@ -213,7 +232,12 @@ game_should_run :: proc() -> bool {
 	return g_mem.run
 }
 @(export)
-game_shutdown :: proc() { free(g_mem) }
+game_shutdown :: proc() { 
+    for sound in g_mem.sounds {
+        rl.UnloadSound(sound)
+    }
+    free(g_mem) 
+}
 @(export)
 game_shutdown_window :: proc() { rl.CloseWindow() }
 @(export)
@@ -308,6 +332,7 @@ create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id 
     manager.entity_to_index[id] = index
     return id
 }
+
 Component_Data :: struct {
     position: Maybe(Vec2),
     velocity: Maybe(Vec2),
@@ -514,6 +539,7 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     }
     if rl.IsKeyPressed(.SPACE) {
         spawn_bullet_from_ship(manager)
+        rl.PlaySound(sounds[.Fire])
     }
 
     is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
@@ -566,14 +592,6 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             vel := get_velocity(manager, index)
             pos := get_position(manager, index)
             set_position(manager, index, pos + vel * dt)
-
-            lifespan := get_lifespan(manager, index)
-            lifespan -= dt
-			if lifespan <= 0 {
-                append(&entities_to_destroy, index)
-			} else {
-                set_lifespan(manager, index, lifespan)
-            }
         case .None:
 		}
         pos := get_position(manager, index)
@@ -586,6 +604,43 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             set_position(manager, index, {pos.x, f32(screen_edge_bottom() - 1)})
         } else if pos.y >= f32(screen_edge_bottom()) {
             set_position(manager, index, {pos.x, f32(screen_edge_top() + 1)})
+        }
+
+        // Collsions against ship
+        if entity_type == .Asteroid {
+            ship_position := get_position(manager, get_player_index())
+            ship_radius := get_radius_physics(manager, get_player_index())
+            entity_radius := get_radius_physics(manager, index)
+            if rl.CheckCollisionCircles(pos, entity_radius, ship_position, ship_radius) {
+                rl.PlaySound(sounds[.Harm])
+                // TODO: how did interaction resolve in classic asteroids?
+                // TODO: how many hits can player take?
+            }
+        }
+        if entity_type == .Bullet {
+            for index_b in 0..<get_active_entity_count(manager^) {
+                entity_type_b := get_entity_type(manager, index_b)
+                if entity_type_b == .Asteroid {
+                    radius_b := get_radius_physics(manager, index_b)
+                    position_b := get_position(manager, index_b)
+                    radius_a := get_radius_physics(manager, index)
+                    if rl.CheckCollisionCircles(pos, radius_a, position_b, radius_b) {
+                        rl.PlaySound(sounds[.Bullet_Impact])
+                        append(&entities_to_destroy, index)
+                        // TODO: check asteroid hp, destroy as needed
+                    }
+                }
+            }
+        }
+
+        if entity_type == .Bullet {
+            lifespan := get_lifespan(manager, index)
+            lifespan -= dt
+			if lifespan <= 0 {
+                append(&entities_to_destroy, index)
+			} else {
+                set_lifespan(manager, index, lifespan)
+            }
         }
 	}
     for index in entities_to_destroy {
@@ -767,7 +822,7 @@ get_player_id :: proc() -> Entity_Id {
 	return g_mem.player_id
 }
 
-player_index :: proc() -> int {
+get_player_index :: proc() -> int {
 	index, ok := g_mem.manager.entity_to_index[g_mem.player_id]
 	if ok {
 		return index
@@ -827,13 +882,17 @@ spawn_asteroid :: proc(kind: Asteroid_Kind, pos: Vec2, vel: Vec2, manager: ^Enti
     id := create_entity(manager, .Asteroid)
     visual_rotation_rate := rand.float32_range(0.1, 1.5)
     radius: f32
+    health: i32
     switch kind {
     case .Small:
         radius = SMALL_ASTEROID_RADIUS
+        health = 1
     case .Medium:
         radius = SMALL_ASTEROID_RADIUS * 1.5
+        health = 2
     case .Large:
         radius = SMALL_ASTEROID_RADIUS * 2.5
+        health = 3
     }
     data_in := Component_Data{
         position = pos,
@@ -843,7 +902,7 @@ spawn_asteroid :: proc(kind: Asteroid_Kind, pos: Vec2, vel: Vec2, manager: ^Enti
         color = rl.GRAY,
         radius_render = radius,
         visual_rotation_rate = visual_rotation_rate,
-        health = 3,
+        health = health,
         is_visible = true,
     }
     set_component_data(manager, id, data_in)
@@ -851,7 +910,6 @@ spawn_asteroid :: proc(kind: Asteroid_Kind, pos: Vec2, vel: Vec2, manager: ^Enti
 
 spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
     id := create_entity(manager, .Bullet)
-    BULLET_SPEED :: 700
     ship_data, ship_ok := get_component_data(manager, get_player_id(), Component_Request_Data{
         rotation = true,
         position = true,
@@ -894,4 +952,23 @@ spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
 
 angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
     return Vec2{math.cos(rot), math.sin(rot)}
+}
+
+load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
+    base_path := "assets/audio/"
+    file: string
+    switch kind {
+	case .Fire:
+        file = "shot-light.wav"
+    case .Thrust:
+        file = "thrust-med.wav"
+    case .Harm:
+        file = "damage-ship.wav"
+    case .Score:
+        file = "score.wav"
+    case .Bullet_Impact:
+        file = "moderate-thud.wav"
+	}
+    path := fmt.ctprintf("%v%v", base_path, file)
+    return rl.LoadSound(path)
 }
