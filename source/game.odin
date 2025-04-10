@@ -24,9 +24,10 @@ N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 10
 
 SHIP_R :: 15
-SHIP_ROTATION_MAGNITUDE :: 4
-THRUST_MAGNITUDE :: 5
-SPACE_FRICTION_COEFFICIENT :: 0.008 // cause of plasma and charged dust
+SHIP_ROTATION_MAGNITUDE :: 5
+SHIP_MAX_SPEED :: 350
+THRUST_MAGNITUDE :: 6
+SPACE_FRICTION_COEFFICIENT :: 0.004 // cause of plasma and charged dust
 
 BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
@@ -573,6 +574,10 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         vel += THRUST_MAGNITUDE * heading
     }
 
+    if linalg.length(vel) > SHIP_MAX_SPEED {
+        dir := linalg.normalize0(vel)
+        vel = dir * SHIP_MAX_SPEED
+    }
     pos += vel * dt
 
     set_rotation(manager, index, rot)
@@ -1102,15 +1107,14 @@ jiggle_asteroid_velocity :: proc(vel: Vec2) -> Vec2 {
 }
 
 // angle deg
-rotate_vector :: proc(v: Vec2, angle: f32) -> Vec2 {
-    angle := angle
-    angle = math.to_radians(angle)
-    x := v.x * math.cos(angle) - v.y * math.sin(angle)
-    y := v.x * math.sin(angle) + v.y * math.cos(angle)
+rotate_vector :: proc(v: Vec2, deg: f32) -> Vec2 {
+    deg := deg
+    deg = math.to_radians(deg)
+    x := v.x * math.cos(deg) - v.y * math.sin(deg)
+    y := v.x * math.sin(deg) + v.y * math.cos(deg)
     return {x,y}
 }
 
-// TODO: try to return the fixed array again???
 spawn_positions_destroyed_medium_asteroid :: proc(pos: Vec2, vel: Vec2) -> [3]Vec2 {
     positions: [3]Vec2
     unit_direction := linalg.normalize0(vel) // doesnt crash on zero vector
