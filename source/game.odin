@@ -14,7 +14,7 @@ DEBUG :: true
 WINDOW_W :: 1800
 WINDOW_H :: 1000
 LOGICAL_W :: 1000
-LOGICAL_H :: 1000
+LOGICAL_H :: 750
 
 PHYSICS_HZ :: 120
 FIXED_DT :: 1 / PHYSICS_HZ
@@ -24,17 +24,22 @@ N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 10
 
 SHIP_R :: 15
-SHIP_ROTATION_MAGNITUDE :: 3
-THRUST_MAGNITUDE :: 10
-SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
+SHIP_ROTATION_MAGNITUDE :: 4
+THRUST_MAGNITUDE :: 5
+SPACE_FRICTION_COEFFICIENT :: 0.008 // cause of plasma and charged dust
 
-BULLET_SPEED :: 600
+BULLET_COUNT_LIMIT :: 4
+BULLET_SPEED :: 500
+BULLET_LIFESPAN_SPEED_RATIO :: 0.0018
+BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
 	run: bool,
 	using manager: ^Entity_Manager,
     sounds: [Sound_Kind]rl.Sound,
+    score: i32,
+    extra_life_count: i32,
 }
 
 g_mem: ^Game_Memory
@@ -47,6 +52,8 @@ Sound_Kind :: enum {
     Score,
     Bullet_Impact,
     Thrust,
+    Asteroid_Explode,
+    Death,
 }
 
 Entity_Id :: distinct u32
@@ -66,7 +73,9 @@ Entity_Manager :: struct {
 Entity_Type :: enum { 
     None,
     Ship, 
-    Asteroid, 
+    Asteroid_Large, 
+    Asteroid_Medium, 
+    Asteroid_Small, 
     Bullet, 
 }
 
@@ -101,12 +110,6 @@ Render_Type :: enum {
 	Asteroid,
 	Bullet,
 	Particle,
-}
-
-Asteroid_Kind :: enum {
-    Small,
-    Medium,
-    Large,
 }
 
 game_camera :: proc() -> rl.Camera2D {
@@ -144,6 +147,7 @@ draw :: proc() {
 
 	rl.BeginMode2D(ui_camera())
 	draw_debug_ui()
+    draw_ui()
 	rl.EndMode2D()
 
 	rl.EndDrawing()
@@ -207,7 +211,15 @@ game_init :: proc() {
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
 
-    spawn_asteroid(.Small, {0, -100}, {0, -100}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Small, {140, 200}, {-20, -100}, g_mem.manager)
+
+    spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
+
+    spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
 
 	game_hot_reloaded(g_mem)
 	pr_span("END game_init")
@@ -286,7 +298,7 @@ draw_ship :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, colo
         rl.DrawLineV(vertices[i], vertices[i+1], color)
     }
     rl.DrawLineV(vertices[3], vertices[0], color)
-    if DEBUG do rl.DrawPixelV(pos, rl.RED)
+    if DEBUG do rl.DrawPixelV(pos, rl.RAYWHITE)
 }
 
 rotate_point :: proc(point: Vec2, center: Vec2, rot: f32 /* rad */) -> Vec2 {
@@ -526,11 +538,13 @@ destroy_entity :: proc(manager: ^Entity_Manager, id_to_destroy: Entity_Id) {
 }
 
 update_ship :: proc(manager: ^Entity_Manager, index: int) {
+    dt := rl.GetFrameTime()
     rot := get_rotation(manager, index)
     pos := get_position(manager, index)
     vel := get_velocity(manager, index)
 
     d_rot: f32
+    is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
     if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
         d_rot = -SHIP_ROTATION_MAGNITUDE
     }
@@ -538,29 +552,27 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         d_rot = SHIP_ROTATION_MAGNITUDE
     }
     if rl.IsKeyPressed(.SPACE) {
-        spawn_bullet_from_ship(manager)
-        rl.PlaySound(sounds[.Fire])
-    }
-
-    is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
-
-    dt := rl.GetFrameTime()
-    rot += d_rot * dt
-    heading : Vec2 = {math.cos(rot), math.sin(rot)} // aka facing, not ship velocity nor direction of movement of body
-
-    vel_thrust_term : Vec2 = is_thrusting ? THRUST_MAGNITUDE * heading : 0
-    vel_space_friction_term : Vec2 = vel * SPACE_FRICTION_COEFFICIENT
-
-    speed := linalg.length(vel)
-    if !is_thrusting && speed > 0 && speed < 30 {
-        braking_factor := 1 / (speed + 10)
-        vel -= vel * braking_factor
-        if linalg.length(vel) < 1 {
-            vel = 0
+        bullet_count: i32
+        for entity_type in manager.types[:get_active_entity_count(manager^)] {
+            if entity_type == .Bullet {
+                bullet_count += 1
+            }
+        }
+        if bullet_count < 4 {
+            spawn_bullet_from_ship(manager)
+            rl.PlaySound(sounds[.Fire])
         }
     }
 
-    vel += vel_thrust_term - vel_space_friction_term
+    rot += d_rot * dt
+    heading : Vec2 = {math.cos(rot), math.sin(rot)} // aka facing, not ship velocity nor direction of movement of body
+
+    if !is_thrusting {
+        vel -= vel * SPACE_FRICTION_COEFFICIENT
+    } else {
+        vel += THRUST_MAGNITUDE * heading
+    }
+
     pos += vel * dt
 
     set_rotation(manager, index, rot)
@@ -575,13 +587,19 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
     // pr_span("")
     entities_to_destroy: [dynamic]int
     defer delete(entities_to_destroy)
-
+    Spawn_Asteroid_Data :: struct {
+        type: Entity_Type,
+        pos: Vec2,
+        vel: Vec2,
+    }
+    asteroids_to_spawn: [dynamic]Spawn_Asteroid_Data
+    defer delete(asteroids_to_spawn)
 	for index in 0..<get_active_entity_count(manager^) {
         entity_type := get_entity_type(manager, index)
         switch entity_type {
 		case .Ship:
             update_ship(manager, index)
-		case .Asteroid:
+		case .Asteroid_Small, .Asteroid_Medium, .Asteroid_Large:
             vel := get_velocity(manager, index)
             pos := get_position(manager, index)
             set_position(manager, index, pos + vel * dt)
@@ -607,27 +625,81 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
         }
 
         // Collsions against ship
-        if entity_type == .Asteroid {
+        if entity_type == .Asteroid_Small || entity_type == .Asteroid_Medium || entity_type == .Asteroid_Large {
             ship_position := get_position(manager, get_player_index())
             ship_radius := get_radius_physics(manager, get_player_index())
             entity_radius := get_radius_physics(manager, index)
             if rl.CheckCollisionCircles(pos, entity_radius, ship_position, ship_radius) {
+                ship_health := get_health(manager, index)
+
+                if ship_health - 1 <= 0 {
+                    rl.PlaySound(sounds[.Death])
+                    // TODO: game over
+                }
+
                 rl.PlaySound(sounds[.Harm])
-                // TODO: how did interaction resolve in classic asteroids?
-                // TODO: how many hits can player take?
+                set_health(manager,index,ship_health-1)
             }
         }
+        // Collisions with bullets
         if entity_type == .Bullet {
             for index_b in 0..<get_active_entity_count(manager^) {
                 entity_type_b := get_entity_type(manager, index_b)
-                if entity_type_b == .Asteroid {
-                    radius_b := get_radius_physics(manager, index_b)
-                    position_b := get_position(manager, index_b)
-                    radius_a := get_radius_physics(manager, index)
-                    if rl.CheckCollisionCircles(pos, radius_a, position_b, radius_b) {
-                        rl.PlaySound(sounds[.Bullet_Impact])
-                        append(&entities_to_destroy, index)
-                        // TODO: check asteroid hp, destroy as needed
+                if entity_type_b == .Asteroid_Small || entity_type_b == .Asteroid_Medium || entity_type_b == .Asteroid_Large {
+                    aster_index := index_b
+                    aster_radius := get_radius_physics(manager, aster_index)
+                    aster_position := get_position(manager, aster_index)
+                    bullet_radius := get_radius_physics(manager, index)
+
+                    if rl.CheckCollisionCircles(pos, bullet_radius, aster_position, aster_radius) {
+                        // Don't re-destroy bullets already slated for destruction
+                        is_slated_destruction := false
+                        for destroy_index in entities_to_destroy {
+                            if index == destroy_index {
+                                is_slated_destruction = true
+                                break
+                            }
+                        }
+                        if !is_slated_destruction {
+                            rl.PlaySound(sounds[.Bullet_Impact])
+                            append(&entities_to_destroy, index)
+                        }
+
+                        // asteroid resolution
+                        health := get_health(manager, aster_index)
+                        if health - 1 <= 0 {
+                            aster_velocity := get_velocity(manager, aster_index)
+                            rl.PlaySound(sounds[.Asteroid_Explode])
+
+                            #partial switch entity_type_b {
+                            case .Asteroid_Small:
+                                increment_score(20)
+
+                            case .Asteroid_Medium:
+                                increment_score(50)
+                                vel_a := jiggle_asteroid_velocity(aster_velocity)
+                                vel_b := jiggle_asteroid_velocity(aster_velocity)
+                                vel_c := jiggle_asteroid_velocity(aster_velocity)
+                                small_positions := spawn_positions_destroyed_medium_asteroid(aster_position, aster_velocity)
+                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[0], vel = vel_a})
+                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[1], vel = vel_b})
+                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[2], vel = vel_c})
+
+                            case .Asteroid_Large:
+                                increment_score(100)
+                                vel_a := jiggle_asteroid_velocity(aster_velocity)
+                                vel_b := jiggle_asteroid_velocity(aster_velocity)
+                                med_positions := spawn_positions_destroyed_large_asteroid (aster_position, aster_velocity)
+                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[0], vel = vel_a})
+                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[1], vel = vel_b})
+                            }
+                            if get_score() > (get_extra_life_count() + 1) * 10000 {
+                                increment_extra_life_count()
+                                ship_health := get_health(manager, index)
+                                set_health(manager, index, ship_health + 1)
+                            }
+                            append(&entities_to_destroy, aster_index)
+                        }
                     }
                 }
             }
@@ -646,6 +718,9 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
     for index in entities_to_destroy {
         id := sa.get(manager.entities, index)
         destroy_entity(manager, id)
+    }
+    for data in asteroids_to_spawn {
+        spawn_asteroid(data.type, data.pos, data.vel, manager)
     }
 }
 
@@ -782,6 +857,20 @@ draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
     rl.DrawPolyLines(pos, N_ASTEROID_SIDES, radius, rot,  color)
 }
 
+get_score :: proc() -> i32 {
+    return g_mem.score
+}
+
+draw_ui :: proc() {
+    rl.DrawText(
+        fmt.ctprintf(
+            "%v",
+            get_score(),
+        ),
+        WINDOW_W / 2 - 25, 50, 42, rl.WHITE,
+    )
+}
+
 draw_debug_ui :: proc() {
     vel := get_velocity(g_mem.manager, 0)
     speed := linalg.length(vel)
@@ -813,7 +902,7 @@ draw_debug_ui :: proc() {
                 screen_left(),
                 screen_right(),
             ),
-            i32(rl.GetScreenWidth() - 300), 3, 12, rl.WHITE,
+            i32(rl.GetScreenWidth() - 210), 3, 12, rl.WHITE,
         )
     }
 }
@@ -868,38 +957,38 @@ spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
         velocity = Vec2{0, 0},
         radius_physics = SHIP_R,
         render_type = Render_Type.Ship,
-        color = rl.GREEN,
+        color = rl.RAYWHITE,
         radius_render = SHIP_R,
         damage = 1,
-        health = 5,
+        health = 3,
         is_visible = true,
         vertices = vertices,
     })
     return id
 }
 
-spawn_asteroid :: proc(kind: Asteroid_Kind, pos: Vec2, vel: Vec2, manager: ^Entity_Manager) {
-    id := create_entity(manager, .Asteroid)
-    visual_rotation_rate := rand.float32_range(0.1, 1.5)
+spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2, manager: ^Entity_Manager) {
+    id := create_entity(manager, entity_type)
+    visual_rotation_rate := rand.float32_range(-2, 2)
     radius: f32
     health: i32
-    switch kind {
-    case .Small:
+    #partial switch entity_type {
+    case .Asteroid_Small:
         radius = SMALL_ASTEROID_RADIUS
         health = 1
-    case .Medium:
-        radius = SMALL_ASTEROID_RADIUS * 1.5
-        health = 2
-    case .Large:
-        radius = SMALL_ASTEROID_RADIUS * 2.5
-        health = 3
+    case .Asteroid_Medium:
+        radius = SMALL_ASTEROID_RADIUS * 2
+        health = 1
+    case .Asteroid_Large:
+        radius = SMALL_ASTEROID_RADIUS * 4
+        health = 1
     }
     data_in := Component_Data{
         position = pos,
         velocity = vel,
         radius_physics = radius,
         render_type = Render_Type.Asteroid,
-        color = rl.GRAY,
+        color = rl.RAYWHITE,
         radius_render = radius,
         visual_rotation_rate = visual_rotation_rate,
         health = health,
@@ -943,9 +1032,9 @@ spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
         velocity = velocity,
         damage = 1,
         is_visible = true,
-        color = rl.RED,
+        color = rl.RAYWHITE,
         render_type = Render_Type.Bullet,
-        lifespan = 1,
+        lifespan = BULLET_LIFESPAN,
     }
     set_component_data(manager, id, data_in)
 }
@@ -968,7 +1057,91 @@ load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
         file = "score.wav"
     case .Bullet_Impact:
         file = "moderate-thud.wav"
+    case .Asteroid_Explode:
+        file = "destroy-asteroid.wav"
+    case .Death:
+        file = "physical-death.wav"
 	}
     path := fmt.ctprintf("%v%v", base_path, file)
     return rl.LoadSound(path)
+}
+
+increment_score :: proc(x: i32) {
+    g_mem.score += x
+}
+
+get_extra_life_count:: proc() -> i32 {
+    return g_mem.extra_life_count
+}
+
+increment_extra_life_count :: proc() {
+    g_mem.extra_life_count += 1
+}
+
+jiggle_asteroid_velocity :: proc(vel: Vec2) -> Vec2 {
+    speed := linalg.length(vel)
+    d_speed :f32= (speed + 10) * 0.1
+    jiggled_speed := rand.float32_range(10 + d_speed, 10 + d_speed + speed)
+
+    // scatter omnidirectionally, instead of biased around 0 (aka East)
+    angle_jiggle_range : f32 = speed == 0 ? 180 : 30
+
+    unit_direction: Vec2
+    if speed == 0 {
+        x := rand.float32_range(-1, 1)
+        y := rand.float32_range(-1, 1)
+        unit_direction = linalg.normalize0(Vec2{x, y})
+    } else {
+        unit_direction = linalg.normalize0(vel)
+    }
+    d_rotation := rand.float32_range(-angle_jiggle_range, angle_jiggle_range)
+    jiggled_direction := rotate_vector(unit_direction, d_rotation)
+
+    jiggled_velocity := jiggled_direction * jiggled_speed
+    return jiggled_velocity
+}
+
+// angle deg
+rotate_vector :: proc(v: Vec2, angle: f32) -> Vec2 {
+    angle := angle
+    angle = math.to_radians(angle)
+    x := v.x * math.cos(angle) - v.y * math.sin(angle)
+    y := v.x * math.sin(angle) + v.y * math.cos(angle)
+    return {x,y}
+}
+
+// TODO: try to return the fixed array again???
+spawn_positions_destroyed_medium_asteroid :: proc(pos: Vec2, vel: Vec2) -> [3]Vec2 {
+    positions: [3]Vec2
+    unit_direction := linalg.normalize0(vel) // doesnt crash on zero vector
+    if linalg.length(unit_direction) == 0 {
+        // extremely rare, if at all possible to get 2 rand values of 0.0
+        unit_direction = make_random_direction()
+    }
+    d_pos :f32= 12
+    d_angle :f32= 120
+    positions[0] = pos + (unit_direction * d_pos)
+    positions[1] = pos + (rotate_vector(unit_direction, d_angle) * d_pos)
+    positions[2] = pos + (rotate_vector(unit_direction, -d_angle) * d_pos)
+    return positions
+}
+
+spawn_positions_destroyed_large_asteroid :: proc(pos: Vec2, vel: Vec2) -> [2]Vec2 {
+    positions: [2]Vec2
+    unit_direction := linalg.normalize0(vel) // doesnt crash on zero vector
+    if linalg.length(unit_direction) == 0 {
+        // extremely rare, if at all possible to get 2 rand values of 0.0
+        unit_direction = make_random_direction()
+    }
+    d_pos :f32= 30
+    d_angle :f32= 90
+    positions[0] = pos + rotate_vector(unit_direction, d_angle) * d_pos
+    positions[1] = pos + rotate_vector(unit_direction, -d_angle) * d_pos
+    return positions
+}
+
+make_random_direction :: proc() -> Vec2 {
+    x := rand.float32_range(-1, 1)
+    y := rand.float32_range(-1, 1)
+    return linalg.normalize0(Vec2{x, y})
 }
