@@ -40,12 +40,28 @@ Game_Memory :: struct {
 	using manager: ^Entity_Manager,
     sounds: [Sound_Kind]rl.Sound,
     score: i32,
+    lives: i32,
     extra_life_count: i32,
+    ship_state: Ship_State,
+    death_timer: Timer,
+    spawn_timer: Timer,
+}
+
+Ship_State :: enum {
+    Normal,
+    Death,
+    Spawning,
+}
+
+Timer :: struct {
+    accum: f32,
+    interval: f32,
 }
 
 g_mem: ^Game_Memory
 sounds: ^[Sound_Kind]rl.Sound
 entity_m: ^Entity_Manager
+ship_state: ^Ship_State
 
 Sound_Kind :: enum {
     Fire,
@@ -205,9 +221,20 @@ game_init :: proc() {
     }
     g_mem.manager = manager
 	g_mem.run = true
+    g_mem.ship_state = .Normal
+    g_mem.lives = 1
+    g_mem.death_timer = Timer {
+        accum = 1,
+        interval = 1,
+    }
+    g_mem.spawn_timer = Timer {
+        accum = 2,
+        interval = 2,
+    }
 
     sounds = &g_mem.sounds
     entity_m = g_mem.manager
+    ship_state = &g_mem.ship_state
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
@@ -269,6 +296,7 @@ game_parent_window_size_changed :: proc(w, h: int) {
 }
 
 draw_entities :: proc(manager: ^Entity_Manager) {
+    dt := rl.GetFrameTime()
     for index in 0..<get_active_entity_count(manager^) {
         if !manager.is_visibles[index] do continue
 
@@ -278,7 +306,15 @@ draw_entities :: proc(manager: ^Entity_Manager) {
 
         switch get_render_type(manager, index) {
         case .Ship:
-            draw_ship(pos, rot, get_vertices(manager,index), color)
+            vertices := get_vertices(manager,index)
+            switch ship_state^ {
+            case .Normal:
+                draw_ship(pos, rot, vertices, color)
+            case .Death:
+                draw_ship_death(pos)
+            case .Spawning:
+                draw_ship_spawning(pos, rot, vertices, color, dt)
+            }
         case .Asteroid:
             radius := get_radius_physics(manager, index)
             draw_asteroid(pos, rot, radius, get_color(manager, index))
@@ -287,6 +323,41 @@ draw_entities :: proc(manager: ^Entity_Manager) {
         case .Particle:
             rl.DrawCircleV(pos, 1.0, color)
         }
+    }
+}
+
+draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color, dt: f32) {
+    @(static) blink_accum : f32 = 0.2
+    @(static) is_visible := true
+    blink_interval :f32= 0.2
+    blink_accum -= dt
+    if blink_accum <= 0 {
+        is_visible = !is_visible
+        blink_accum = blink_interval
+    }
+    if is_visible {
+        draw_ship(pos, rot, vertices, color)
+    }
+}
+
+draw_ship_death :: proc(pos: Vec2) {
+    start_positions := [4]Vec2{
+        {-10, 0},
+        {10, 0},
+        {0, -10},
+        {0, 10},
+    }
+    end_positions := [4]Vec2{
+        {-50, 0},
+        {50, 0},
+        {0,-50},
+        {0,50},
+    }
+    for i in 0..<len(start_positions) {
+        t := (g_mem.death_timer.interval - g_mem.death_timer.accum) / g_mem.death_timer.interval
+        pos_x := math.lerp(pos.x + start_positions[i].x, pos.x + end_positions[i].x, t)
+        pos_y := math.lerp(pos.y + start_positions[i].y, pos.y + end_positions[i].y, t)
+        rl.DrawPixelV({pos_x, pos_y}, rl.RAYWHITE)
     }
 }
 
@@ -540,49 +611,75 @@ destroy_entity :: proc(manager: ^Entity_Manager, id_to_destroy: Entity_Id) {
 
 update_ship :: proc(manager: ^Entity_Manager, index: int) {
     dt := rl.GetFrameTime()
-    rot := get_rotation(manager, index)
-    pos := get_position(manager, index)
-    vel := get_velocity(manager, index)
-
-    d_rot: f32
-    is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
-    if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
-        d_rot = -SHIP_ROTATION_MAGNITUDE
-    }
-    if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
-        d_rot = SHIP_ROTATION_MAGNITUDE
-    }
-    if rl.IsKeyPressed(.SPACE) {
-        bullet_count: i32
-        for entity_type in manager.types[:get_active_entity_count(manager^)] {
-            if entity_type == .Bullet {
-                bullet_count += 1
+    switch ship_state^ {
+    case .Death:
+        tick_timer(&g_mem.death_timer, dt)
+        pr(g_mem.death_timer.accum)
+        if g_mem.death_timer.accum <= 0 {
+            if g_mem.lives < 0 {
+                game_over()
+            } else {
+            pr("DEATH to SPAWNING!")
+                ship_state^ = .Spawning
+            }
+            restart_timer(&g_mem.death_timer)
+        }
+    case .Spawning, .Normal:
+        if ship_state^ == .Spawning {
+            tick_timer(&g_mem.spawn_timer, dt)
+            if g_mem.spawn_timer.accum <= 0 {
+                pr("SPAWNING to NORMAL!")
+                ship_state^ = .Normal
+                restart_timer(&g_mem.spawn_timer)
             }
         }
-        if bullet_count < 4 {
-            spawn_bullet_from_ship(manager)
-            rl.PlaySound(sounds[.Fire])
+        rot := get_rotation(manager, index)
+        pos := get_position(manager, index)
+        vel := get_velocity(manager, index)
+
+        d_rot: f32
+        is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
+        if is_thrusting && !rl.IsSoundPlaying(sounds[.Thrust]){
+                rl.PlaySound(sounds[.Thrust])
         }
-    }
+        if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
+            d_rot = -SHIP_ROTATION_MAGNITUDE
+        }
+        if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
+            d_rot = SHIP_ROTATION_MAGNITUDE
+        }
+        if rl.IsKeyPressed(.SPACE) {
+            bullet_count: i32
+            for entity_type in manager.types[:get_active_entity_count(manager^)] {
+                if entity_type == .Bullet {
+                    bullet_count += 1
+                }
+            }
+            if bullet_count < 4 {
+                spawn_bullet_from_ship(manager)
+                rl.PlaySound(sounds[.Fire])
+            }
+        }
 
-    rot += d_rot * dt
-    heading : Vec2 = {math.cos(rot), math.sin(rot)} // aka facing, not ship velocity nor direction of movement of body
+        rot += d_rot * dt
+        heading : Vec2 = {math.cos(rot), math.sin(rot)} // aka facing, not ship velocity nor direction of movement of body
 
-    if !is_thrusting {
-        vel -= vel * SPACE_FRICTION_COEFFICIENT
-    } else {
-        vel += THRUST_MAGNITUDE * heading
-    }
+        if !is_thrusting {
+            vel -= vel * SPACE_FRICTION_COEFFICIENT
+        } else {
+            vel += THRUST_MAGNITUDE * heading
+        }
 
-    if linalg.length(vel) > SHIP_MAX_SPEED {
-        dir := linalg.normalize0(vel)
-        vel = dir * SHIP_MAX_SPEED
-    }
-    pos += vel * dt
+        if linalg.length(vel) > SHIP_MAX_SPEED {
+            dir := linalg.normalize0(vel)
+            vel = dir * SHIP_MAX_SPEED
+        }
+        pos += vel * dt
 
-    set_rotation(manager, index, rot)
-    set_position(manager, index, pos)
-    set_velocity(manager, index, vel)
+        set_rotation(manager, index, rot)
+        set_position(manager, index, pos)
+        set_velocity(manager, index, vel)
+    } // switch/case
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
@@ -629,6 +726,9 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             set_position(manager, index, {pos.x, f32(screen_edge_top() + 1)})
         }
 
+        if ship_state^ != .Normal {
+            continue
+        }
         // Collsions against ship
         if entity_type == .Asteroid_Small || entity_type == .Asteroid_Medium || entity_type == .Asteroid_Large {
             ship_position := get_position(manager, get_player_index())
@@ -638,11 +738,17 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
                 ship_health := get_health(manager, index)
 
                 if ship_health - 1 <= 0 {
-                    rl.PlaySound(sounds[.Death])
-                    // TODO: game over
+                    if !rl.IsSoundPlaying(sounds[.Death]) {
+                        rl.PlaySound(sounds[.Death])
+                    }
+                    g_mem.lives -= 1
+                    ship_state^ = .Death
+                    set_velocity(manager, get_player_index(), Vec2{0,0})
                 }
 
-                rl.PlaySound(sounds[.Harm])
+                if !rl.IsSoundPlaying(sounds[.Harm]) {
+                    rl.PlaySound(sounds[.Harm])
+                }
                 set_health(manager,index,ship_health-1)
             }
         }
@@ -1055,7 +1161,7 @@ load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
 	case .Fire:
         file = "shot-light.wav"
     case .Thrust:
-        file = "thrust-med.wav"
+        file = "thrust.wav"
     case .Harm:
         file = "damage-ship.wav"
     case .Score:
@@ -1148,4 +1254,19 @@ make_random_direction :: proc() -> Vec2 {
     x := rand.float32_range(-1, 1)
     y := rand.float32_range(-1, 1)
     return linalg.normalize0(Vec2{x, y})
+}
+
+tick_timer :: proc (timer: ^Timer, dt: f32) {
+    timer.accum -= dt
+}
+restart_timer :: proc(timer: ^Timer) {
+    timer.accum = timer.interval
+}
+clear_timer :: proc(timer: ^Timer) {
+    timer.accum = 0
+}
+
+game_over :: proc() {
+    pr_span("GAME OVER")
+    g_mem.run = false
 }
