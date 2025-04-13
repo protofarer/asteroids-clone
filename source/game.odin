@@ -27,7 +27,7 @@ SHIP_R :: 15
 SHIP_ROTATION_MAGNITUDE :: 5
 SHIP_MAX_SPEED :: 350
 THRUST_MAGNITUDE :: 6
-SPACE_FRICTION_COEFFICIENT :: 0.004 // cause of plasma and charged dust
+SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
 
 BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
@@ -222,7 +222,7 @@ game_init :: proc() {
     g_mem.manager = manager
 	g_mem.run = true
     g_mem.ship_state = .Normal
-    g_mem.lives = 1
+    g_mem.lives = 3
     g_mem.death_timer = Timer {
         accum = 1,
         interval = 1,
@@ -309,7 +309,7 @@ draw_entities :: proc(manager: ^Entity_Manager) {
             vertices := get_vertices(manager,index)
             switch ship_state^ {
             case .Normal:
-                draw_ship(pos, rot, vertices, color)
+                draw_ship(pos, rot, 1)
             case .Death:
                 draw_ship_death(pos)
             case .Spawning:
@@ -336,7 +336,7 @@ draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Compon
         blink_accum = blink_interval
     }
     if is_visible {
-        draw_ship(pos, rot, vertices, color)
+        draw_ship(pos, rot, 1)
     }
 }
 
@@ -361,15 +361,21 @@ draw_ship_death :: proc(pos: Vec2) {
     }
 }
 
-draw_ship :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color) {
-    vertices := vertices
+draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 0) {
+    r := SHIP_R * scale
+    tail_angle := math.to_radians(f32(45))
+    vertices: Render_Vertices_Component
+    vertices[0] = Vec2{r, 0}
+    vertices[1] =  Vec2{-r*math.cos(tail_angle), -r*math.sin(tail_angle)}
+    vertices[2] =  Vec2{-r*0.25, 0}
+    vertices[3] =  Vec2{-r*math.cos(tail_angle), r*math.sin(tail_angle)}
     for &vertex in vertices {
         vertex = rotate_point(vertex, {0, 0}, rot) + pos
     }
     for i in 0..<3 {
-        rl.DrawLineV(vertices[i], vertices[i+1], color)
+        rl.DrawLineV(vertices[i], vertices[i+1], rl.RAYWHITE)
     }
-    rl.DrawLineV(vertices[3], vertices[0], color)
+    rl.DrawLineV(vertices[3], vertices[0], rl.RAYWHITE)
     if DEBUG do rl.DrawPixelV(pos, rl.RAYWHITE)
 }
 
@@ -743,6 +749,8 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
                     }
                     g_mem.lives -= 1
                     ship_state^ = .Death
+                    set_position(manager, get_player_index(), Vec2{0,0})
+                    set_rotation(manager, get_player_index(), math.to_radians(f32(-90)))
                     set_velocity(manager, get_player_index(), Vec2{0,0})
                 }
 
@@ -980,6 +988,9 @@ draw_ui :: proc() {
         ),
         WINDOW_W / 2 - 25, 50, 42, rl.WHITE,
     )
+    for i in 0..<g_mem.lives {
+        draw_ship({300 + f32(i) * 20, 100}, math.to_radians(f32(-90)), 1)
+    }
 }
 
 draw_debug_ui :: proc() {
@@ -1055,13 +1066,6 @@ log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
 spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
     id := create_entity(manager, .Ship)
 
-    tail_angle := math.to_radians(f32(45))
-    vertices: Render_Vertices_Component
-    vertices[0] = Vec2{SHIP_R, 0}
-    vertices[1] =  Vec2{-SHIP_R*math.cos(tail_angle), -SHIP_R*math.sin(tail_angle)}
-    vertices[2] =  Vec2{-SHIP_R*0.25, 0}
-    vertices[3] =  Vec2{-SHIP_R*math.cos(tail_angle), SHIP_R*math.sin(tail_angle)}
-
     set_component_data(manager, id, Component_Data{
         position = pos,
         rotation = rot,
@@ -1073,7 +1077,6 @@ spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
         damage = 1,
         health = 3,
         is_visible = true,
-        vertices = vertices,
     })
     return id
 }
@@ -1259,9 +1262,11 @@ make_random_direction :: proc() -> Vec2 {
 tick_timer :: proc (timer: ^Timer, dt: f32) {
     timer.accum -= dt
 }
+
 restart_timer :: proc(timer: ^Timer) {
     timer.accum = timer.interval
 }
+
 clear_timer :: proc(timer: ^Timer) {
     timer.accum = 0
 }
