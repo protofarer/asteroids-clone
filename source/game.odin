@@ -45,6 +45,12 @@ Game_Memory :: struct {
     ship_state: Ship_State,
     death_timer: Timer,
     spawn_timer: Timer,
+    game_state: Game_State,
+}
+
+Game_State :: enum {
+    Play,
+    Game_Over,
 }
 
 Ship_State :: enum {
@@ -62,6 +68,7 @@ g_mem: ^Game_Memory
 sounds: ^[Sound_Kind]rl.Sound
 entity_m: ^Entity_Manager
 ship_state: ^Ship_State
+game_state: ^Game_State
 
 Sound_Kind :: enum {
     Fire,
@@ -145,10 +152,29 @@ ui_camera :: proc() -> rl.Camera2D {
 	}
 }
 
+set_game_over :: proc() {
+    game_state^ = .Game_Over
+}
+
+eval_game_over :: proc() {
+    if rl.IsKeyPressed(.V) {
+        set_game_over()
+    }
+    if game_state^ == .Game_Over {
+        if rl.IsKeyPressed(.SPACE) {
+            reset_gameplay_data()
+        }
+    }
+}
+
 update :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) {
 		g_mem.run = false
 	}
+
+    eval_game_over()
+    if game_state^ == .Game_Over do return
+
     dt := rl.GetFrameTime()
     update_entities(entity_m, dt)
 }
@@ -222,6 +248,7 @@ game_init :: proc() {
     g_mem.manager = manager
 	g_mem.run = true
     g_mem.ship_state = .Normal
+    g_mem.game_state = .Play
     g_mem.lives = 3
     g_mem.death_timer = Timer {
         accum = 1,
@@ -235,6 +262,7 @@ game_init :: proc() {
     sounds = &g_mem.sounds
     entity_m = g_mem.manager
     ship_state = &g_mem.ship_state
+    game_state = &g_mem.game_state
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
@@ -620,12 +648,10 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     switch ship_state^ {
     case .Death:
         tick_timer(&g_mem.death_timer, dt)
-        pr(g_mem.death_timer.accum)
         if g_mem.death_timer.accum <= 0 {
-            if g_mem.lives < 0 {
-                game_over()
+            if g_mem.lives <= 0 {
+                set_game_over()
             } else {
-            pr("DEATH to SPAWNING!")
                 ship_state^ = .Spawning
             }
             restart_timer(&g_mem.death_timer)
@@ -634,7 +660,6 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         if ship_state^ == .Spawning {
             tick_timer(&g_mem.spawn_timer, dt)
             if g_mem.spawn_timer.accum <= 0 {
-                pr("SPAWNING to NORMAL!")
                 ship_state^ = .Normal
                 restart_timer(&g_mem.spawn_timer)
             }
@@ -655,6 +680,9 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             d_rot = SHIP_ROTATION_MAGNITUDE
         }
         if rl.IsKeyPressed(.SPACE) {
+            if ship_state^ == .Spawning {
+                ship_state^ = .Normal
+            }
             bullet_count: i32
             for entity_type in manager.types[:get_active_entity_count(manager^)] {
                 if entity_type == .Bullet {
@@ -979,8 +1007,7 @@ draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
 get_score :: proc() -> i32 {
     return g_mem.score
 }
-
-draw_ui :: proc() {
+draw_score:: proc() {
     rl.DrawText(
         fmt.ctprintf(
             "%v",
@@ -988,8 +1015,24 @@ draw_ui :: proc() {
         ),
         WINDOW_W / 2 - 25, 50, 42, rl.WHITE,
     )
+}
+draw_lives :: proc() {
     for i in 0..<g_mem.lives {
-        draw_ship({300 + f32(i) * 20, 100}, math.to_radians(f32(-90)), 1)
+        draw_ship({300 + f32(i) * 25, 100}, math.to_radians(f32(-90)), 1)
+    }
+}
+draw_game_over :: proc () {
+    rl.DrawText(
+        fmt.ctprint("GAME OVER\nPress SPACE to play again"),
+        WINDOW_W / 2, WINDOW_H / 2, 40, rl.WHITE,
+    )
+}
+
+draw_ui :: proc() {
+    draw_score()
+    draw_lives()
+    if game_state^ == .Game_Over {
+        draw_game_over()
     }
 }
 
@@ -1271,7 +1314,44 @@ clear_timer :: proc(timer: ^Timer) {
     timer.accum = 0
 }
 
-game_over :: proc() {
-    pr_span("GAME OVER")
-    g_mem.run = false
+// clear and init
+reset_gameplay_data :: proc() {
+    // Reset globals
+    g_mem.player_id = 0
+    g_mem.run = true
+    g_mem.ship_state = .Normal
+    g_mem.game_state = .Play
+    g_mem.score = 0
+    g_mem.lives = 3
+    g_mem.extra_life_count = 0
+    g_mem.death_timer = Timer {
+        accum = 1,
+        interval = 1,
+    }
+    g_mem.spawn_timer = Timer {
+        accum = 2,
+        interval = 2,
+    }
+
+    // Reset Entity Manager
+    sa.resize(&entity_m.entities, 0)
+    sa.resize(&entity_m.free_list, 0)
+    entity_m.types = {}
+    clear(&entity_m.entity_to_index)
+    entity_m.physics^ = {}
+    entity_m.rendering^ = {}
+    entity_m.gameplay^ = {}
+
+
+	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
+    g_mem.player_id = player_id
+
+    // TODO: use spawner elsewhere
+    spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
+
+    spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
+    spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
 }
