@@ -21,9 +21,9 @@ FIXED_DT :: 1 / PHYSICS_HZ
 
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
-SMALL_ASTEROID_RADIUS :: 10
+SMALL_ASTEROID_RADIUS :: 15
 
-SHIP_R :: 15
+SHIP_R :: 22
 SHIP_ROTATION_MAGNITUDE :: 5
 SHIP_MAX_SPEED :: 350
 THRUST_MAGNITUDE :: 6
@@ -33,6 +33,10 @@ BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
 BULLET_LIFESPAN_SPEED_RATIO :: 0.0018
 BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
+
+TIMER_INTERVAL_DEATH :: 1
+TIMER_INTERVAL_SPAWN :: 2
+TIMER_INTERVAL_BETWEEN_LEVELS :: 1
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
@@ -45,10 +49,12 @@ Game_Memory :: struct {
     ship_state: Ship_State,
     death_timer: Timer,
     spawn_timer: Timer,
+    between_levels_timer: Timer,
     game_state: Game_State,
 }
 
 Game_State :: enum {
+    Between_Levels,
     Play,
     Game_Over,
 }
@@ -177,6 +183,79 @@ update :: proc() {
 
     dt := rl.GetFrameTime()
     update_entities(entity_m, dt)
+
+    count := get_asteroid_count(entity_m^)
+    if count == 0 && game_state^ == .Play {
+        game_state^ = .Between_Levels
+    } else if game_state^ == .Between_Levels {
+        tick_timer(&g_mem.between_levels_timer, dt)
+        if is_timer_done(g_mem.between_levels_timer) {
+            game_state^ = .Play
+            restart_timer(&g_mem.between_levels_timer)
+            spawn_level(entity_m)
+        }
+    }
+
+    // TODO: check heartbeat rate, spawn UFO in proportion
+}
+
+get_asteroid_count :: proc(entity_m: Entity_Manager) -> i32 {
+    count : i32 = 0
+    for i in 0..<get_active_entity_count(entity_m) {
+        if entity_m.types[i] == .Asteroid_Large || entity_m.types[i] == .Asteroid_Medium || entity_m.types[i] == .Asteroid_Small {
+            count += 1
+        }
+    }
+    return count
+}
+
+spawn_level :: proc(entity_m: ^Entity_Manager) {
+    @(static) level : i32 = 1
+    @(static) spawn_offset : f32 = 10
+    for _ in 0..<level+3 {
+        unit_direction := make_random_direction()
+        speed := rand.float32_range(50,120)
+        vel := speed * unit_direction
+
+        pos: Vec2
+
+        rgn := rand.float32_range(0, 4)
+        pr("rgn:", rgn)
+        // top boundary
+        if rgn < 1 {
+            span_proportion := rgn
+            dx := span_proportion * f32(play_span_x())
+            x := f32(play_edge_left()) + dx
+            y := f32(play_edge_top()) + spawn_offset
+            pos = {x,y}
+
+        // right boundary
+        } else if rgn < 2 {
+            span_proportion := rgn - 1
+            dy := span_proportion * f32(play_span_y())
+            x := f32(play_edge_right()) - spawn_offset
+            y := f32(play_edge_top()) + dy
+            pos = {x,y}
+
+        // bot boundary
+        } else if rgn < 3 {
+            span_proportion := rgn - 2
+            dx := span_proportion * f32(play_span_x())
+            x := f32(play_edge_left()) + dx
+            y := f32(play_edge_bottom()) - spawn_offset
+            pos = {x,y}
+
+        // left boundary
+        } else if rgn < 4 {
+            span_proportion := rgn - 3
+            dy := span_proportion * f32(play_span_y())
+            x := f32(play_edge_left()) + spawn_offset
+            y := f32(play_edge_top()) + dy
+            pos = {x,y}
+        }
+        spawn_asteroid(.Asteroid_Large, pos, vel, entity_m)
+    }
+    level += 1
 }
 
 draw :: proc() {
@@ -195,21 +274,31 @@ draw :: proc() {
 
 	rl.EndDrawing()
 }
-screen_edge_left :: proc() -> i32 {
+// Screen edges are all within play area. The drawn boundary line currently within of play area
+// TODO: make boundary line (draw_screen_edges) outside of play area
+// more aptly named, play_edge_left/top...
+// screen_left/top/right/bot should be the actual boundary lines
+play_edge_left :: proc() -> i32 {
     return i32(screen_left() + 1)
 }
-screen_edge_top :: proc() -> i32 {
-    return i32(screen_top() + 1)
+play_edge_top :: proc() -> i32 {
+    return i32(screen_top() + 2)
 }
-screen_edge_right :: proc() -> i32 {
-    return i32(screen_edge_left() + LOGICAL_W - 2)
+play_edge_right :: proc() -> i32 {
+    return i32(play_edge_left() + LOGICAL_W - 2)
 }
-screen_edge_bottom :: proc() -> i32 {
-    return i32(screen_edge_top() + LOGICAL_H - 2)
+play_edge_bottom :: proc() -> i32 {
+    return i32(play_edge_top() + LOGICAL_H - 3)
+}
+play_span_x :: proc() -> i32 {
+    return i32(play_edge_right() - play_edge_left())
+}
+play_span_y :: proc() -> i32 {
+    return i32(play_edge_bottom() - play_edge_top())
 }
 
 draw_screen_edges :: proc() {
-    rl.DrawRectangleLines(screen_edge_left(), screen_edge_top(), LOGICAL_W - 2, LOGICAL_H - 2, rl.BLUE)
+    rl.DrawRectangleLines(i32(screen_left()), i32(screen_top() + 1), LOGICAL_W, LOGICAL_H, rl.BLUE)
 }
 
 @(export)
@@ -248,15 +337,19 @@ game_init :: proc() {
     g_mem.manager = manager
 	g_mem.run = true
     g_mem.ship_state = .Normal
-    g_mem.game_state = .Play
+    g_mem.game_state = .Between_Levels
     g_mem.lives = 3
     g_mem.death_timer = Timer {
-        accum = 1,
-        interval = 1,
+        accum = TIMER_INTERVAL_DEATH,
+        interval = TIMER_INTERVAL_DEATH,
     }
     g_mem.spawn_timer = Timer {
-        accum = 2,
-        interval = 2,
+        accum = TIMER_INTERVAL_SPAWN,
+        interval = TIMER_INTERVAL_SPAWN,
+    }
+    g_mem.between_levels_timer = Timer {
+        accum = TIMER_INTERVAL_BETWEEN_LEVELS,
+        interval = TIMER_INTERVAL_BETWEEN_LEVELS,
     }
 
     sounds = &g_mem.sounds
@@ -269,13 +362,13 @@ game_init :: proc() {
 
     // spawn_asteroid(.Asteroid_Small, {140, 200}, {-20, -100}, g_mem.manager)
 
-    spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
-
-    spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
+    //
+    // spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
+    // spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
 
 	game_hot_reloaded(g_mem)
 	pr_span("END game_init")
@@ -335,26 +428,31 @@ draw_entities :: proc(manager: ^Entity_Manager) {
         switch get_render_type(manager, index) {
         case .Ship:
             vertices := get_vertices(manager,index)
+            scale := get_scale(manager, index)
             switch ship_state^ {
             case .Normal:
-                draw_ship(pos, rot, 1)
+                draw_ship(pos, rot, scale)
             case .Death:
                 draw_ship_death(pos)
             case .Spawning:
-                draw_ship_spawning(pos, rot, vertices, color, dt)
+                draw_ship_spawning(pos, rot, vertices, color, dt, scale)
             }
         case .Asteroid:
             radius := get_radius_physics(manager, index)
             draw_asteroid(pos, rot, radius, get_color(manager, index))
         case .Bullet:
-            rl.DrawRectangle(i32(pos.x), i32(pos.y), 2, 2, color)
+            draw_bullet(pos, color)
         case .Particle:
             rl.DrawCircleV(pos, 1.0, color)
         }
     }
 }
 
-draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color, dt: f32) {
+draw_bullet :: proc(pos: Vec2, color: rl.Color) {
+    rl.DrawRectangle(i32(pos.x), i32(pos.y), 3, 3, color)
+}
+
+draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color, dt: f32, scale: f32) {
     @(static) blink_accum : f32 = 0.2
     @(static) is_visible := true
     blink_interval :f32= 0.2
@@ -364,22 +462,30 @@ draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Compon
         blink_accum = blink_interval
     }
     if is_visible {
-        draw_ship(pos, rot, 1)
+        draw_ship(pos, rot, scale)
     }
 }
 
 draw_ship_death :: proc(pos: Vec2) {
-    start_positions := [4]Vec2{
-        {-10, 0},
+    start_positions := [?]Vec2{
         {10, 0},
-        {0, -10},
+        {5, 5},
         {0, 10},
+        {-5, 5},
+        {0, -10},
+        {-5, -5},
+        {-10, 0},
+        {5, -5},
     }
-    end_positions := [4]Vec2{
-        {-50, 0},
+    end_positions := [?]Vec2{
         {50, 0},
-        {0,-50},
+        {25, 25},
         {0,50},
+        {-25, 25},
+        {0,-50},
+        {-25, -25},
+        {-50, 0},
+        {25, -25},
     }
     for i in 0..<len(start_positions) {
         t := (g_mem.death_timer.interval - g_mem.death_timer.accum) / g_mem.death_timer.interval
@@ -389,14 +495,14 @@ draw_ship_death :: proc(pos: Vec2) {
     }
 }
 
-draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 0) {
+draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
     r := SHIP_R * scale
-    tail_angle := math.to_radians(f32(45))
+    tail_angle := math.to_radians(f32(39))
     vertices: Render_Vertices_Component
-    vertices[0] = Vec2{r, 0}
-    vertices[1] =  Vec2{-r*math.cos(tail_angle), -r*math.sin(tail_angle)}
-    vertices[2] =  Vec2{-r*0.25, 0}
-    vertices[3] =  Vec2{-r*math.cos(tail_angle), r*math.sin(tail_angle)}
+    vertices[0] = scale * Vec2{r, 0}
+    vertices[1] =  scale * Vec2{-r*math.cos(tail_angle), -r*math.sin(tail_angle)}
+    vertices[2] =  scale * Vec2{-r*0.25, 0} * 0.5
+    vertices[3] =  scale * Vec2{-r*math.cos(tail_angle), r*math.sin(tail_angle)}
     for &vertex in vertices {
         vertex = rotate_point(vertex, {0, 0}, rot) + pos
     }
@@ -648,7 +754,7 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     switch ship_state^ {
     case .Death:
         tick_timer(&g_mem.death_timer, dt)
-        if g_mem.death_timer.accum <= 0 {
+        if is_timer_done(g_mem.death_timer) {
             if g_mem.lives <= 0 {
                 set_game_over()
             } else {
@@ -659,7 +765,7 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
     case .Spawning, .Normal:
         if ship_state^ == .Spawning {
             tick_timer(&g_mem.spawn_timer, dt)
-            if g_mem.spawn_timer.accum <= 0 {
+            if is_timer_done(g_mem.spawn_timer) {
                 ship_state^ = .Normal
                 restart_timer(&g_mem.spawn_timer)
             }
@@ -749,15 +855,15 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
         case .None:
 		}
         pos := get_position(manager, index)
-        if pos.x <= f32(screen_edge_left()) {
-            set_position(manager, index, {f32(screen_edge_right() - 1), pos.y})
-        } else if pos.x >= f32(screen_edge_right()) {
-            set_position(manager, index, {f32(screen_edge_left() + 1), pos.y})
+        if pos.x <= f32(play_edge_left()) {
+            set_position(manager, index, {f32(play_edge_right() - 1), pos.y})
+        } else if pos.x >= f32(play_edge_right()) {
+            set_position(manager, index, {f32(play_edge_left() + 1), pos.y})
         }
-        if pos.y <= f32(screen_edge_top()) {
-            set_position(manager, index, {pos.x, f32(screen_edge_bottom() - 1)})
-        } else if pos.y >= f32(screen_edge_bottom()) {
-            set_position(manager, index, {pos.x, f32(screen_edge_top() + 1)})
+        if pos.y <= f32(play_edge_top()) {
+            set_position(manager, index, {pos.x, f32(play_edge_bottom() - 1)})
+        } else if pos.y >= f32(play_edge_bottom()) {
+            set_position(manager, index, {pos.x, f32(play_edge_top() + 1)})
         }
 
         if ship_state^ != .Normal {
@@ -1013,12 +1119,12 @@ draw_score:: proc() {
             "%v",
             get_score(),
         ),
-        WINDOW_W / 2 - 25, 50, 42, rl.WHITE,
+        300, 30, 42, rl.WHITE,
     )
 }
 draw_lives :: proc() {
     for i in 0..<g_mem.lives {
-        draw_ship({300 + f32(i) * 25, 100}, math.to_radians(f32(-90)), 1)
+        draw_ship({315 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
     }
 }
 draw_game_over :: proc () {
@@ -1042,7 +1148,7 @@ draw_debug_ui :: proc() {
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
@@ -1056,6 +1162,8 @@ draw_debug_ui :: proc() {
                 get_active_entity_count(g_mem.manager^),
                 sa.slice(&g_mem.entities)[:sa.len(g_mem.entities)],
                 sa.slice(&g_mem.free_list)[:sa.len(g_mem.free_list)],
+                game_state^,
+                ship_state^,
             ),
             3, 3, 12, rl.WHITE,
         )
@@ -1314,24 +1422,23 @@ clear_timer :: proc(timer: ^Timer) {
     timer.accum = 0
 }
 
+is_timer_done :: proc(timer: Timer) -> bool {
+    return timer.accum <= 0
+}
+
 // clear and init
 reset_gameplay_data :: proc() {
     // Reset globals
     g_mem.player_id = 0
     g_mem.run = true
     g_mem.ship_state = .Normal
-    g_mem.game_state = .Play
+    g_mem.game_state = .Between_Levels
     g_mem.score = 0
     g_mem.lives = 3
     g_mem.extra_life_count = 0
-    g_mem.death_timer = Timer {
-        accum = 1,
-        interval = 1,
-    }
-    g_mem.spawn_timer = Timer {
-        accum = 2,
-        interval = 2,
-    }
+    restart_timer(&g_mem.death_timer)
+    restart_timer(&g_mem.spawn_timer)
+    restart_timer(&g_mem.between_levels_timer)
 
     // Reset Entity Manager
     sa.resize(&entity_m.entities, 0)
