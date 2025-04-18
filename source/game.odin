@@ -23,6 +23,9 @@ MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 15
 
+BIG_UFO_RADIUS :: 25
+SMALL_UFO_RADIUS :: 12
+
 SHIP_R :: 22
 SHIP_ROTATION_MAGNITUDE :: 5
 SHIP_MAX_SPEED :: 350
@@ -37,6 +40,9 @@ BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
 TIMER_INTERVAL_DEATH :: 1
 TIMER_INTERVAL_SPAWN :: 2
 TIMER_INTERVAL_BETWEEN_LEVELS :: 1
+TIMER_INTERVAL_BEAT :: 15
+TIMER_INTERVAL_UFO :: 3
+INIT_TIMER_INTERVAL_BEAT_SOUND :: 4
 
 Game_Memory :: struct {
 	player_id: Entity_Id,
@@ -51,6 +57,10 @@ Game_Memory :: struct {
     spawn_timer: Timer,
     between_levels_timer: Timer,
     game_state: Game_State,
+    beat_level: i32,
+    beat_level_timer: Timer,
+    ufo_timer: Timer,
+    beat_sound_timer: Timer,
 }
 
 Game_State :: enum {
@@ -107,6 +117,8 @@ Entity_Type :: enum {
     Asteroid_Medium, 
     Asteroid_Small, 
     Bullet, 
+    Ufo_Big,
+    Ufo_Small,
 }
 
 Physics_Data :: struct {
@@ -140,6 +152,8 @@ Render_Type :: enum {
 	Asteroid,
 	Bullet,
 	Particle,
+    Ufo_Big,
+    Ufo_Small,
 }
 
 game_camera :: proc() -> rl.Camera2D {
@@ -184,6 +198,7 @@ update :: proc() {
     dt := rl.GetFrameTime()
     update_entities(entity_m, dt)
 
+    // The pause between levels, then spawn the level
     count := get_asteroid_count(entity_m^)
     if count == 0 && game_state^ == .Play {
         game_state^ = .Between_Levels
@@ -193,10 +208,65 @@ update :: proc() {
             game_state^ = .Play
             restart_timer(&g_mem.between_levels_timer)
             spawn_level(entity_m)
+            restart_timer(&g_mem.beat_level_timer)
+            g_mem.beat_level = 1
         }
     }
 
-    // TODO: check heartbeat rate, spawn UFO in proportion
+    // Update beat levels
+    tick_timer(&g_mem.beat_level_timer, dt)
+    if is_timer_done(g_mem.beat_level_timer) {
+        g_mem.beat_level = clamp(g_mem.beat_level + 1, 1, 3)
+        update_beat_sound_timer_with_level(g_mem.beat_level)
+    }
+
+    // Play beat sound IAW beat level
+    tick_timer(&g_mem.beat_sound_timer, dt)
+    if is_timer_done(g_mem.beat_sound_timer) {
+        // TODO:
+        // rl.PlaySound(sounds[.Beat])
+    }
+
+    // Spawn Ufos
+    tick_timer(&g_mem.ufo_timer, dt)
+    if is_timer_done(g_mem.ufo_timer) {
+        spawner_ufo(g_mem.beat_level)
+    }
+}
+
+spawner_ufo :: proc(beat_level: i32) {
+    // multiply beat_level by some factor and then chance to spawn ufo
+    // only spawn every interval
+    rgn := rand.float32()
+    base_probability :: 0.15
+    probability := f32(beat_level) * base_probability
+    if rgn < probability {
+        // TODO: rand left or right wall, y_pos
+        spawn_ufo(.Ufo_Big, { 50, -50 }, true, entity_m)
+    }
+}
+
+spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, entity_m: ^Entity_Manager) {
+    id := create_entity(entity_m, entity_type)
+    radius: f32
+    #partial switch entity_type {
+    case .Ufo_Big:
+        radius = BIG_UFO_RADIUS
+    case .Ufo_Small:
+        radius = SMALL_UFO_RADIUS
+    }
+    data_in := Component_Data{
+        position = pos,
+        velocity = is_moving_right ? Vec2{1,0} : Vec2{-1,0},
+        radius_physics = radius,
+        render_type = Render_Type.Ufo_Big,
+        color = rl.RAYWHITE,
+        radius_render = radius,
+        health = 1,
+        is_visible = true,
+    }
+    set_component_data(entity_m, id, data_in)
+
 }
 
 get_asteroid_count :: proc(entity_m: Entity_Manager) -> i32 {
@@ -351,6 +421,19 @@ game_init :: proc() {
         accum = TIMER_INTERVAL_BETWEEN_LEVELS,
         interval = TIMER_INTERVAL_BETWEEN_LEVELS,
     }
+    g_mem.beat_level_timer = Timer {
+        accum = TIMER_INTERVAL_BEAT,
+        interval = TIMER_INTERVAL_BEAT,
+    }
+    g_mem.beat_level = 1
+    g_mem.ufo_timer = Timer {
+        accum = TIMER_INTERVAL_UFO,
+        interval = TIMER_INTERVAL_UFO,
+    }
+    g_mem.beat_sound_timer = Timer {
+        accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
+        interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
+    }
 
     sounds = &g_mem.sounds
     entity_m = g_mem.manager
@@ -444,8 +527,14 @@ draw_entities :: proc(manager: ^Entity_Manager) {
             draw_bullet(pos, color)
         case .Particle:
             rl.DrawCircleV(pos, 1.0, color)
+        case .Ufo_Big, .Ufo_Small:
+            draw_ufo_big(pos, color)
         }
     }
+}
+
+draw_ufo_big :: proc(pos: Vec2, color: rl.Color) {
+    rl.DrawCircleV(pos, BIG_UFO_RADIUS, color)
 }
 
 draw_bullet :: proc(pos: Vec2, color: rl.Color) {
@@ -852,6 +941,12 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             vel := get_velocity(manager, index)
             pos := get_position(manager, index)
             set_position(manager, index, pos + vel * dt)
+        case .Ufo_Big, .Ufo_Small:
+            // TODO: change velocity every so often, just use a global Ufo movement timer
+            // TODO: every timer interval, there's a chance to move diag up, diag down, or straight
+            // TODO: every ufo_fire_timer interval, chance to fire
+            // TODO: ufo big fires randomly
+            // TODO: ufo small fires at ship pos
         case .None:
 		}
         pos := get_position(manager, index)
@@ -1436,9 +1531,16 @@ reset_gameplay_data :: proc() {
     g_mem.score = 0
     g_mem.lives = 3
     g_mem.extra_life_count = 0
+    g_mem.beat_level = 0
     restart_timer(&g_mem.death_timer)
     restart_timer(&g_mem.spawn_timer)
     restart_timer(&g_mem.between_levels_timer)
+    restart_timer(&g_mem.beat_level_timer)
+    restart_timer(&g_mem.ufo_timer)
+    g_mem.beat_sound_timer = Timer {
+        accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
+        interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
+    }
 
     // Reset Entity Manager
     sa.resize(&entity_m.entities, 0)
@@ -1461,4 +1563,9 @@ reset_gameplay_data :: proc() {
     spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
     spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
     spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
+}
+
+update_beat_sound_timer_with_level :: proc(beat_level: i32) {
+    g_mem.beat_sound_timer.interval *= INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.8, f32(beat_level))
+    g_mem.beat_sound_timer.accum = g_mem.beat_sound_timer.interval
 }
