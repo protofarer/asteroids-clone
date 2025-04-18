@@ -40,10 +40,10 @@ BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
 TIMER_INTERVAL_DEATH :: 1
 TIMER_INTERVAL_SPAWN :: 2
 TIMER_INTERVAL_BETWEEN_LEVELS :: 1
-TIMER_INTERVAL_BEAT :: 15
+TIMER_INTERVAL_BEAT :: 12
 TIMER_INTERVAL_UFO :: 3
-INIT_TIMER_INTERVAL_BEAT_SOUND :: 4
-
+INIT_TIMER_INTERVAL_BEAT_SOUND :: 1
+TIMER_INTERVAL_THRUST_DRAW :: 0.1
 Game_Memory :: struct {
 	player_id: Entity_Id,
 	run: bool,
@@ -61,6 +61,9 @@ Game_Memory :: struct {
     beat_level_timer: Timer,
     ufo_timer: Timer,
     beat_sound_timer: Timer,
+    is_beat_sound_hi: bool,
+    thrust_draw_timer: Timer,
+    is_thrust_drawing: bool,
 }
 
 Game_State :: enum {
@@ -94,6 +97,8 @@ Sound_Kind :: enum {
     Thrust,
     Asteroid_Explode,
     Death,
+    Beat_Lo,
+    Beat_Hi,
 }
 
 Entity_Id :: distinct u32
@@ -196,6 +201,7 @@ update :: proc() {
     if game_state^ == .Game_Over do return
 
     dt := rl.GetFrameTime()
+
     update_entities(entity_m, dt)
 
     // The pause between levels, then spawn the level
@@ -207,31 +213,39 @@ update :: proc() {
         if is_timer_done(g_mem.between_levels_timer) {
             game_state^ = .Play
             restart_timer(&g_mem.between_levels_timer)
-            spawn_level(entity_m)
             restart_timer(&g_mem.beat_level_timer)
+            restart_timer(&g_mem.beat_sound_timer)
             g_mem.beat_level = 1
+            update_beat_sound_timer_with_level(1)
+            spawn_level(entity_m)
         }
     }
 
     // Update beat levels
     tick_timer(&g_mem.beat_level_timer, dt)
     if is_timer_done(g_mem.beat_level_timer) {
-        g_mem.beat_level = clamp(g_mem.beat_level + 1, 1, 3)
+        g_mem.beat_level = clamp(g_mem.beat_level + 1, 1, 4)
         update_beat_sound_timer_with_level(g_mem.beat_level)
+        restart_timer(&g_mem.beat_level_timer)
     }
 
     // Play beat sound IAW beat level
     tick_timer(&g_mem.beat_sound_timer, dt)
     if is_timer_done(g_mem.beat_sound_timer) {
-        // TODO:
-        // rl.PlaySound(sounds[.Beat])
+        if g_mem.is_beat_sound_hi {
+            rl.PlaySound(sounds[.Beat_Hi])
+        } else {
+            rl.PlaySound(sounds[.Beat_Lo])
+        }
+        restart_timer(&g_mem.beat_sound_timer)
+        g_mem.is_beat_sound_hi = !g_mem.is_beat_sound_hi
     }
 
     // Spawn Ufos
-    tick_timer(&g_mem.ufo_timer, dt)
-    if is_timer_done(g_mem.ufo_timer) {
-        spawner_ufo(g_mem.beat_level)
-    }
+    // tick_timer(&g_mem.ufo_timer, dt)
+    // if is_timer_done(g_mem.ufo_timer) {
+    //     spawner_ufo(g_mem.beat_level)
+    // }
 }
 
 spawner_ufo :: proc(beat_level: i32) {
@@ -290,7 +304,6 @@ spawn_level :: proc(entity_m: ^Entity_Manager) {
         pos: Vec2
 
         rgn := rand.float32_range(0, 4)
-        pr("rgn:", rgn)
         // top boundary
         if rgn < 1 {
             span_proportion := rgn
@@ -433,6 +446,10 @@ game_init :: proc() {
     g_mem.beat_sound_timer = Timer {
         accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
         interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
+    }
+    g_mem.thrust_draw_timer = Timer {
+        accum = TIMER_INTERVAL_THRUST_DRAW,
+        interval = TIMER_INTERVAL_THRUST_DRAW,
     }
 
     sounds = &g_mem.sounds
@@ -585,20 +602,60 @@ draw_ship_death :: proc(pos: Vec2) {
 }
 
 draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
-    r := SHIP_R * scale
-    tail_angle := math.to_radians(f32(39))
+    r : f32 = SHIP_R * scale
+    // tail_angle := math.to_radians(f32(39))
+    // vertices: Render_Vertices_Component
+    // vertices[0] = Vec2{r, 0}
+    // vertices[1] =  Vec2{-r*math.cos(tail_angle), -r*math.sin(tail_angle)}
+    // vertices[2] =  Vec2{-r*0.25, 0} * 0.5
+    // vertices[3] =  Vec2{-r*math.cos(tail_angle), r*math.sin(tail_angle)}
+    // for i in 0..<3 {
+    //     rl.DrawLineV(vertices[i], vertices[i+1], rl.RAYWHITE)
+    // }
+    // rl.DrawLineV(vertices[3], vertices[0], rl.RAYWHITE)
+
+    s : f32 = r * 1.63 // side length
+    b : f32 = r * 0.25 // butt length
+    nose_angle := math.to_radians(f32(32))
+
+    // Body
     vertices: Render_Vertices_Component
-    vertices[0] = scale * Vec2{r, 0}
-    vertices[1] =  scale * Vec2{-r*math.cos(tail_angle), -r*math.sin(tail_angle)}
-    vertices[2] =  scale * Vec2{-r*0.25, 0} * 0.5
-    vertices[3] =  scale * Vec2{-r*math.cos(tail_angle), r*math.sin(tail_angle)}
-    for &vertex in vertices {
+
+     // nose
+    vertices[0] = Vec2{r, 0}
+
+    // sides
+    vertices[1] =  Vec2{r - s * math.cos(nose_angle/2), -r * math.sin(nose_angle)} // left edge
+    vertices[2] =  Vec2{r - s * math.cos(nose_angle/2), r * math.sin(nose_angle)} // right edge
+
+     // butt
+    b_half_y := (b + r) * math.tan(nose_angle/2) + 1 // add 1, pixel connecting butt to side may or may not render depending on s(?) or r
+    vertices[3] = Vec2{-b, -b_half_y}
+    vertices[4] = Vec2{-b, b_half_y}
+
+    for &vertex in vertices[:5] {
         vertex = rotate_point(vertex, {0, 0}, rot) + pos
     }
-    for i in 0..<3 {
-        rl.DrawLineV(vertices[i], vertices[i+1], rl.RAYWHITE)
+    rl.DrawLineV(vertices[0], vertices[1], rl.RAYWHITE)
+    rl.DrawLineV(vertices[0], vertices[2], rl.RAYWHITE)
+    rl.DrawLineV(vertices[3], vertices[4], rl.RAYWHITE)
+
+    //////////////////////
+
+    // Thrust
+    if g_mem.is_thrust_drawing {
+        t := b + (r * 0.5) // thrust exhaust length
+        thrust_vertices: Render_Vertices_Component
+        thrust_vertices[0] =  Vec2{-t, 0}
+        thrust_vertices[1] = Vec2{-b, -(b_half_y * 0.6)}
+        thrust_vertices[2] =  Vec2{-b, (b_half_y * 0.6)}
+        for &vertex in thrust_vertices[:3] {
+            vertex = rotate_point(vertex, {0, 0}, rot) + pos
+        }
+        rl.DrawLineV(thrust_vertices[0], thrust_vertices[1], rl.RAYWHITE)
+        rl.DrawLineV(thrust_vertices[0], thrust_vertices[2], rl.RAYWHITE)
     }
-    rl.DrawLineV(vertices[3], vertices[0], rl.RAYWHITE)
+
     if DEBUG do rl.DrawPixelV(pos, rl.RAYWHITE)
 }
 
@@ -847,6 +904,9 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             if g_mem.lives <= 0 {
                 set_game_over()
             } else {
+                set_position(manager, index, Vec2{0,0})
+                set_rotation(manager, index, math.to_radians(f32(-90)))
+                set_velocity(manager, index, Vec2{0,0})
                 ship_state^ = .Spawning
             }
             restart_timer(&g_mem.death_timer)
@@ -865,6 +925,18 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
 
         d_rot: f32
         is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
+        is_thrusting_up := rl.IsKeyReleased(.DOWN) || rl.IsKeyReleased(.S)
+        if is_thrusting {
+            tick_timer(&g_mem.thrust_draw_timer, dt)
+            if is_timer_done(g_mem.thrust_draw_timer) {
+                restart_timer(&g_mem.thrust_draw_timer)
+                g_mem.is_thrust_drawing = !g_mem.is_thrust_drawing
+            }
+        }
+        if is_thrusting_up {
+            restart_timer(&g_mem.thrust_draw_timer)
+            g_mem.is_thrust_drawing = false
+        }
         if is_thrusting && !rl.IsSoundPlaying(sounds[.Thrust]){
                 rl.PlaySound(sounds[.Thrust])
         }
@@ -978,9 +1050,6 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
                     }
                     g_mem.lives -= 1
                     ship_state^ = .Death
-                    set_position(manager, get_player_index(), Vec2{0,0})
-                    set_rotation(manager, get_player_index(), math.to_radians(f32(-90)))
-                    set_velocity(manager, get_player_index(), Vec2{0,0})
                 }
 
                 if !rl.IsSoundPlaying(sounds[.Harm]) {
@@ -1421,6 +1490,10 @@ load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
         file = "destroy-asteroid.wav"
     case .Death:
         file = "physical-death.wav"
+    case .Beat_Lo:
+        file = "beat-low.wav"
+    case .Beat_Hi:
+        file = "beat-hi.wav"
 	}
     path := fmt.ctprintf("%v%v", base_path, file)
     return rl.LoadSound(path)
@@ -1541,6 +1614,7 @@ reset_gameplay_data :: proc() {
         accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
         interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
     }
+    restart_timer(&g_mem.thrust_draw_timer)
 
     // Reset Entity Manager
     sa.resize(&entity_m.entities, 0)
@@ -1566,6 +1640,6 @@ reset_gameplay_data :: proc() {
 }
 
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
-    g_mem.beat_sound_timer.interval *= INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.8, f32(beat_level))
-    g_mem.beat_sound_timer.accum = g_mem.beat_sound_timer.interval
+    g_mem.beat_sound_timer.interval = INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.86, f32(beat_level))
+    // g_mem.beat_sound_timer.accum = g_mem.beat_sound_timer.interval
 }
