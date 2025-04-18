@@ -24,7 +24,7 @@ N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 15
 
 BIG_UFO_RADIUS :: 25
-SMALL_UFO_RADIUS :: 12
+SMALL_UFO_RADIUS :: 15
 
 SHIP_R :: 22
 SHIP_ROTATION_MAGNITUDE :: 5
@@ -217,7 +217,8 @@ update :: proc() {
             restart_timer(&g_mem.beat_sound_timer)
             g_mem.beat_level = 1
             update_beat_sound_timer_with_level(1)
-            spawn_level(entity_m)
+            // WARN: rm me after testing ufos
+            // spawn_level(entity_m)
         }
     }
 
@@ -242,21 +243,34 @@ update :: proc() {
     }
 
     // Spawn Ufos
-    // tick_timer(&g_mem.ufo_timer, dt)
-    // if is_timer_done(g_mem.ufo_timer) {
-    //     spawner_ufo(g_mem.beat_level)
-    // }
+    tick_timer(&g_mem.ufo_timer, dt)
+    if is_timer_done(g_mem.ufo_timer) {
+        spawner_ufo(g_mem.beat_level)
+        restart_timer(&g_mem.ufo_timer)
+    }
 }
 
 spawner_ufo :: proc(beat_level: i32) {
     // multiply beat_level by some factor and then chance to spawn ufo
     // only spawn every interval
-    rgn := rand.float32()
-    base_probability :: 0.15
+    rgn_spawn := rand.float32()
+    // base_probability :: 0.15
+    base_probability :: 1
     probability := f32(beat_level) * base_probability
-    if rgn < probability {
-        // TODO: rand left or right wall, y_pos
-        spawn_ufo(.Ufo_Big, { 50, -50 }, true, entity_m)
+    if rgn_spawn < probability {
+        rgn_pos := rand.float32_range(0, 2)
+        span_y := f32(play_span_y())
+        if rgn_pos < 1 {
+            // spawn left wall
+            pos_y := (rgn_pos * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
+            pos_x := f32(play_edge_left())
+            spawn_ufo(.Ufo_Big, {pos_x, pos_y}, true, entity_m)
+        } else {
+            // spawn right wall
+            pos_y := ((rgn_pos - 1) * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
+            pos_x := f32(play_edge_right())
+            spawn_ufo(.Ufo_Big, {pos_x, pos_y}, false, entity_m)
+        }
     }
 }
 
@@ -271,8 +285,8 @@ spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, en
     }
     data_in := Component_Data{
         position = pos,
-        velocity = is_moving_right ? Vec2{1,0} : Vec2{-1,0},
-        radius_physics = radius,
+        velocity = is_moving_right ? Vec2{100,0} : Vec2{-100,0},
+        radius_physics = radius * 0.8,
         render_type = Render_Type.Ufo_Big,
         color = rl.RAYWHITE,
         radius_render = radius,
@@ -544,14 +558,82 @@ draw_entities :: proc(manager: ^Entity_Manager) {
             draw_bullet(pos, color)
         case .Particle:
             rl.DrawCircleV(pos, 1.0, color)
-        case .Ufo_Big, .Ufo_Small:
+        case .Ufo_Big:
             draw_ufo_big(pos, color)
+            physics_radius := get_radius_physics(manager, index)
+            if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
+        case .Ufo_Small:
+            draw_ufo_small(pos, color)
+            physics_radius := get_radius_physics(manager, index)
+            if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
         }
     }
 }
 
+draw_ufo_small :: proc(pos: Vec2, color: rl.Color) {
+    r :f32= SMALL_UFO_RADIUS
+    b :f32= r // body half length
+    s1 :f32= (r*0.4) // top and bottom body half lengths
+    h1 :f32= (r*0.37) // body half height, canopy height
+    c1 :f32= (r*0.25) // canopy half length
+    outline_vertices := [?]Vec2 {
+        {-b, 0},
+        {-s1, -h1},
+        {-c1, -2*h1},
+        {c1, -2*h1},
+        {s1, -h1},
+        {b, 0},
+        {s1, h1},
+        {-s1, h1},
+        {-b, 0},
+    }
+    for i in 0..<len(outline_vertices) - 1 {
+        rl.DrawLineV(outline_vertices[i] + pos, outline_vertices[i+1] + pos, rl.RAYWHITE)
+    }
+    body_line := [?]Vec2{
+        {-b, 0},
+        {b, 0},
+    }
+    rl.DrawLineV(body_line[0] + pos, body_line[1] + pos, rl.RAYWHITE)
+
+    canopy_line := [?]Vec2{
+        {-s1, -h1},
+        {s1, -h1},
+    }
+    rl.DrawLineV(canopy_line[0] + pos, canopy_line[1] + pos, rl.RAYWHITE)
+}
+
 draw_ufo_big :: proc(pos: Vec2, color: rl.Color) {
-    rl.DrawCircleV(pos, BIG_UFO_RADIUS, color)
+    r :f32= BIG_UFO_RADIUS
+    b :f32= r // body half length
+    s1 :f32= (r*0.4) // top and bottom body half lengths
+    h1 :f32= (r*0.37) // body half height, canopy height
+    c1 :f32= (r*0.25) // canopy half length
+    outline_vertices := [?]Vec2 {
+        {-b, 0},
+        {-s1, -h1},
+        {-c1, -2*h1},
+        {c1, -2*h1},
+        {s1, -h1},
+        {b, 0},
+        {s1, h1},
+        {-s1, h1},
+        {-b, 0},
+    }
+    for i in 0..<len(outline_vertices) - 1 {
+        rl.DrawLineV(outline_vertices[i] + pos, outline_vertices[i+1] + pos, rl.RAYWHITE)
+    }
+    body_line := [?]Vec2{
+        {-b, 0},
+        {b, 0},
+    }
+    rl.DrawLineV(body_line[0] + pos, body_line[1] + pos, rl.RAYWHITE)
+
+    canopy_line := [?]Vec2{
+        {-s1, -h1},
+        {s1, -h1},
+    }
+    rl.DrawLineV(canopy_line[0] + pos, canopy_line[1] + pos, rl.RAYWHITE)
 }
 
 draw_bullet :: proc(pos: Vec2, color: rl.Color) {
@@ -988,7 +1070,7 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
     // pr("entity_to_idx:",manager.entity_to_index)
     // pr("free_list:",sa.slice(&manager.free_list)[:(sa.len(manager.free_list))])
     // pr_span("")
-    entities_to_destroy: [dynamic]int
+    entities_to_destroy: [dynamic]int // uses index
     defer delete(entities_to_destroy)
     Spawn_Asteroid_Data :: struct {
         type: Entity_Type,
@@ -1014,11 +1096,17 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             pos := get_position(manager, index)
             set_position(manager, index, pos + vel * dt)
         case .Ufo_Big, .Ufo_Small:
-            // TODO: change velocity every so often, just use a global Ufo movement timer
-            // TODO: every timer interval, there's a chance to move diag up, diag down, or straight
-            // TODO: every ufo_fire_timer interval, chance to fire
-            // TODO: ufo big fires randomly
-            // TODO: ufo small fires at ship pos
+            vel := get_velocity(manager, index)
+            pos := get_position(manager, index)
+            new_pos := pos + vel * dt
+            if is_out_of_bounds(new_pos) {
+                pr_span("")
+                pr("ufo destroyed pos", new_pos)
+                pr_span("")
+                append(&entities_to_destroy, index)
+            } else {
+                set_position(manager, index, new_pos)
+            }
         case .None:
 		}
         pos := get_position(manager, index)
@@ -1312,7 +1400,7 @@ draw_debug_ui :: proc() {
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v\nplay_area_top: %v\nplay_area_bot:%v\nplay_area_left: %v\nplay_area_right: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
@@ -1328,6 +1416,10 @@ draw_debug_ui :: proc() {
                 sa.slice(&g_mem.free_list)[:sa.len(g_mem.free_list)],
                 game_state^,
                 ship_state^,
+                play_edge_top(),
+                play_edge_bottom(),
+                play_edge_left(),
+                play_edge_right(),
             ),
             3, 3, 12, rl.WHITE,
         )
@@ -1642,4 +1734,8 @@ reset_gameplay_data :: proc() {
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
     g_mem.beat_sound_timer.interval = INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.86, f32(beat_level))
     // g_mem.beat_sound_timer.accum = g_mem.beat_sound_timer.interval
+}
+
+is_out_of_bounds :: proc(pos: Vec2) -> bool {
+    return pos.x < f32(play_edge_left()) || pos.x > f32(play_edge_right()) || pos.y < f32(play_edge_top()) || pos.y > f32(play_edge_bottom())
 }
