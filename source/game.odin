@@ -34,10 +34,11 @@ TIMER_INTERVAL_DEATH :: 1
 TIMER_INTERVAL_SPAWN :: 2
 TIMER_INTERVAL_BETWEEN_LEVELS :: 1
 
-BULLET_COUNT_LIMIT :: 4
+SHIP_BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
 BULLET_LIFESPAN_SPEED_RATIO :: 0.0018
 BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
+BULLET_PHYSICS_RADIUS :: 1
 
 BIG_UFO_RADIUS :: 25
 BIG_UFO_SPEED :: 150
@@ -51,7 +52,7 @@ SMALL_UFO_SPEED :: 175
 TIMER_INTERVAL_UFO_SMALL_MOVE :: 0.2
 SMALL_UFO_CHANCE_TO_MOVE :: 1
 TIMER_INTERVAL_UFO_SMALL_SHOOT :: 0.5
-SMALL_UFO_CHANCE_TO_SHOOT :: 0.6
+SMALL_UFO_CHANCE_TO_SHOOT :: 1
 
 TIMER_INTERVAL_BEAT :: 12
 TIMER_INTERVAL_UFO :: 3
@@ -77,6 +78,7 @@ Game_Memory :: struct {
     is_beat_sound_hi: bool,
     thrust_draw_timer: Timer,
     is_thrust_drawing: bool,
+    ship_active_bullets: i32,
 }
 
 Game_State :: enum {
@@ -152,6 +154,13 @@ Gameplay_Data :: struct {
 	lifespans: [MAX_ENTITIES]f32,
     shot_timers: [MAX_ENTITIES]Timer,
     move_timers: [MAX_ENTITIES]Timer,
+    shooters: [MAX_ENTITIES]Shooter_Type,
+}
+
+Shooter_Type :: enum {
+    None,
+    Ship,
+    Ufo,
 }
 
 MAX_RENDER_VERTICES :: 8
@@ -167,6 +176,7 @@ Rendering_Data :: struct {
 }
 
 Render_Type :: enum {
+    None,
 	Ship,
 	Asteroid,
 	Bullet,
@@ -178,7 +188,6 @@ Render_Type :: enum {
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
-
 	return {
 		zoom = h/LOGICAL_H,
 		offset = { w/2, h/2 },
@@ -217,6 +226,37 @@ update :: proc() {
     dt := rl.GetFrameTime()
 
     update_entities(entity_m, dt)
+    handle_collisions(g_mem.manager)
+
+
+    // lifespans
+    bullets_with_expired_lifespans: [dynamic]int
+    defer delete(bullets_with_expired_lifespans)
+    for index in 0..<get_active_entity_count(g_mem.manager^) {
+        type := get_entity_type(g_mem.manager, index)
+        if type == .Bullet {
+            lifespan := get_lifespan(g_mem.manager, index)
+            new_lifespan := lifespan - dt
+            if new_lifespan <= 0 {
+                append(&bullets_with_expired_lifespans, index)
+            } else {
+                set_lifespan(g_mem.manager, index, new_lifespan)
+            }
+        }
+    }
+    // TODO: proc for get_id_from_index
+    for index in bullets_with_expired_lifespans {
+        id := sa.get(g_mem.manager.entities, index)
+        shooter := get_shooter(g_mem.manager, index)
+        if shooter == .Ship {
+            g_mem.ship_active_bullets -= 1
+        }
+        destroy_entity(g_mem.manager, id)
+    }
+
+    if get_score() > (get_extra_life_count() + 1) * 10000 {
+        increment_extra_life_count()
+    }
 
     // The pause between levels, then spawn the level
     count := get_asteroid_count(entity_m^)
@@ -259,7 +299,7 @@ update :: proc() {
     // Spawn Ufos
     tick_timer(&g_mem.ufo_timer, dt)
     if is_timer_done(g_mem.ufo_timer) {
-        spawner_ufo(g_mem.beat_level)
+        // spawner_ufo(g_mem.beat_level)
         restart_timer(&g_mem.ufo_timer)
     }
 }
@@ -603,6 +643,7 @@ draw_entities :: proc(manager: ^Entity_Manager) {
             draw_ufo_small(pos, color)
             physics_radius := get_radius_physics(manager, index)
             if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
+        case .None:
         }
     }
 }
@@ -657,20 +698,23 @@ draw_ufo_big :: proc(pos: Vec2, color: rl.Color) {
         {-s1, h1},
         {-b, 0},
     }
+
+    offset := Vec2{0, 1} // fit better within collision circle
+    d_pos := pos + offset
     for i in 0..<len(outline_vertices) - 1 {
-        rl.DrawLineV(outline_vertices[i] + pos, outline_vertices[i+1] + pos, rl.RAYWHITE)
+        rl.DrawLineV(outline_vertices[i] + d_pos, outline_vertices[i+1] + d_pos, rl.RAYWHITE)
     }
     body_line := [?]Vec2{
         {-b, 0},
         {b, 0},
     }
-    rl.DrawLineV(body_line[0] + pos, body_line[1] + pos, rl.RAYWHITE)
+    rl.DrawLineV(body_line[0] + d_pos, body_line[1] + d_pos, rl.RAYWHITE)
 
     canopy_line := [?]Vec2{
         {-s1, -h1},
         {s1, -h1},
     }
-    rl.DrawLineV(canopy_line[0] + pos, canopy_line[1] + pos, rl.RAYWHITE)
+    rl.DrawLineV(canopy_line[0] + d_pos, canopy_line[1] + d_pos, rl.RAYWHITE)
 }
 
 draw_bullet :: proc(pos: Vec2, color: rl.Color) {
@@ -800,8 +844,6 @@ generate_entity_id :: proc(manager: Entity_Manager) -> Entity_Id {
 }
 
 create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id {
-	// pr_span("IN create_entity")
-
     index := get_active_entity_count(manager^)
 	if index > MAX_ENTITIES {
 		log_warn("Failed to create entity, max entities reached")
@@ -812,6 +854,7 @@ create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id 
     id: Entity_Id
     if sa.len(manager.free_list) > 0 {
         id = sa.pop_back(&manager.free_list)
+        reset_entity_components(manager, index)
     } else {
         id = generate_entity_id(manager^)
     }
@@ -821,6 +864,7 @@ create_entity :: proc(manager: ^Entity_Manager, type: Entity_Type) -> Entity_Id 
     return id
 }
 
+// NOTE: remember to update this for every new component!
 Component_Data :: struct {
     position: Maybe(Vec2),
     velocity: Maybe(Vec2),
@@ -839,8 +883,10 @@ Component_Data :: struct {
     is_visible: Maybe(bool),
     move_timer: Maybe(Timer),
     shot_timer: Maybe(Timer),
+    shooter: Maybe(Shooter_Type),
 }
 
+// NOTE: remember to update this for every new component!
 Component_Request_Data :: struct {
     position: bool,
     velocity: bool,
@@ -859,8 +905,10 @@ Component_Request_Data :: struct {
     scale: bool,
     move_timer: bool,
     shot_timer: bool,
+    shooter: bool,
 }
 
+// NOTE: remember to update this for every new component!
 get_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Component_Request_Data) -> (Component_Data, bool) {
     index, ok := manager.entity_to_index[id]
 
@@ -911,9 +959,19 @@ get_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Com
     if request.is_visible {
         data.is_visible = get_is_visible(manager, index)
     }
+    if request.move_timer {
+        data.move_timer = get_move_timer(manager, index)
+    }
+    if request.shot_timer {
+        data.shot_timer = get_shot_timer(manager, index)
+    }
+    if request.shooter {
+        data.shooter = get_shooter(manager, index)
+    }
     return data, true
 }
 
+// NOTE: remember to update this for every new component!
 set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Component_Data) -> bool {
     idx, ok_idx := manager.entity_to_index[id]
 
@@ -964,6 +1022,11 @@ set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Compon
     } else {
         set_is_visible(manager, idx, true)
     }
+    if val, ok := data.scale.?; ok {
+        set_scale(manager, idx, val)
+    } else {
+        set_scale(manager, idx, 1)
+    }
     if val, ok := data.move_timer.?; ok {
         set_move_timer(manager, idx, val)
     } else {
@@ -974,10 +1037,10 @@ set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Compon
     } else {
         set_shot_timer(manager, idx, Timer{})
     }
-    if val, ok := data.scale.?; ok {
-        set_scale(manager, idx, val)
+    if val, ok := data.shooter.?; ok {
+        set_shooter(manager, idx, val)
     } else {
-        set_scale(manager, idx, 1)
+        set_shooter(manager, idx, .None)
     }
     return true
 }
@@ -1005,6 +1068,7 @@ _pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Type, Component_Da
         render_type = manager.rendering.types_render[last_index],
         move_timer = manager.move_timers[last_index],
         shot_timer = manager.shot_timers[last_index],
+        shooter = manager.shooters[last_index],
     }
     return type, data, last_id, last_index
 }
@@ -1055,7 +1119,6 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             }
         }
         rot := get_rotation(manager, index)
-        pos := get_position(manager, index)
         vel := get_velocity(manager, index)
 
         d_rot: f32
@@ -1081,19 +1144,14 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
             d_rot = SHIP_ROTATION_MAGNITUDE
         }
+
         if rl.IsKeyPressed(.SPACE) {
-            if ship_state^ == .Spawning {
-                ship_state^ = .Normal
-            }
-            bullet_count: i32
-            for entity_type in manager.types[:get_active_entity_count(manager^)] {
-                if entity_type == .Bullet {
-                    bullet_count += 1
-                }
-            }
-            if bullet_count < 4 {
+            if g_mem.ship_active_bullets < SHIP_BULLET_COUNT_LIMIT {
                 spawn_bullet_from_ship(manager)
                 rl.PlaySound(sounds[.Fire])
+                if ship_state^ == .Spawning {
+                    ship_state^ = .Normal
+                }
             }
         }
 
@@ -1110,12 +1168,16 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             dir := linalg.normalize0(vel)
             vel = dir * SHIP_MAX_SPEED
         }
-        pos += vel * dt
 
         set_rotation(manager, index, rot)
-        set_position(manager, index, pos)
         set_velocity(manager, index, vel)
     } // switch/case
+}
+
+Spawn_Asteroid_Data :: struct {
+    type: Entity_Type,
+    pos: Vec2,
+    vel: Vec2,
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
@@ -1123,164 +1185,359 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
     // pr("entity_to_idx:",manager.entity_to_index)
     // pr("free_list:",sa.slice(&manager.free_list)[:(sa.len(manager.free_list))])
     // pr_span("")
-    entities_to_destroy: [dynamic]int // uses index
-    defer delete(entities_to_destroy)
-    Spawn_Asteroid_Data :: struct {
-        type: Entity_Type,
-        pos: Vec2,
-        vel: Vec2,
-    }
-    asteroids_to_spawn: [dynamic]Spawn_Asteroid_Data
-    defer delete(asteroids_to_spawn)
-	for index in 0..<get_active_entity_count(manager^) {
+
+    // TODO: make this a set, merge with ent_to_destroy, do at end of frame
+    entities_to_destroy_behavioral: [dynamic]int
+    defer delete(entities_to_destroy_behavioral)
+
+    n_active_entities := get_active_entity_count(manager^)
+	for index in 0..<n_active_entities {
+
+        // TODO: set position for all, do oob outside
+        // Entity Autonomous Behavior
+
         entity_type := get_entity_type(manager, index)
+        pos := get_position(manager, index)
         switch entity_type {
 		case .Ship:
             update_ship(manager, index)
 		case .Asteroid_Small, .Asteroid_Medium, .Asteroid_Large:
-            vel := get_velocity(manager, index)
-            pos := get_position(manager, index)
-            set_position(manager, index, pos + vel * dt)
             rot := get_rotation(manager, index)
             visual_rotation_rate := get_visual_rotation_rate(manager, index)
             set_rotation(manager, index, rot + visual_rotation_rate)
 		case .Bullet:
-            vel := get_velocity(manager, index)
-            pos := get_position(manager, index)
-            set_position(manager, index, pos + vel * dt)
         case .Ufo_Big, .Ufo_Small:
             vel := get_velocity(manager, index)
-            pos := get_position(manager, index)
             move_timer := get_move_timer(manager, index)
             process_ufo_move(manager, index, dt, move_timer, vel, entity_type)
+
             shot_timer := get_shot_timer(manager, index)
             process_ufo_shot(manager, index, dt, shot_timer, entity_type, pos)
-            new_pos := pos + vel * dt
-            if is_out_of_bounds(new_pos) {
-                append(&entities_to_destroy, index)
-            } else {
-                set_position(manager, index, new_pos)
-            }
+
         case .None:
 		}
-        pos := get_position(manager, index)
-        if pos.x <= f32(play_edge_left()) {
-            set_position(manager, index, {f32(play_edge_right() - 1), pos.y})
-        } else if pos.x >= f32(play_edge_right()) {
-            set_position(manager, index, {f32(play_edge_left() + 1), pos.y})
+
+        vel := get_velocity(manager, index)
+        new_pos := pos + vel * dt
+        set_position(manager, index, new_pos)
+
+        if (entity_type == .Ufo_Small || entity_type == .Ufo_Big) && is_out_of_bounds(new_pos) {
+            append(&entities_to_destroy_behavioral, index)
+        } 
+
+        // Wraparound
+        if new_pos.x <= f32(play_edge_left()) {
+            set_position(manager, index, {f32(play_edge_right() - 1), new_pos.y})
+        } else if new_pos.x >= f32(play_edge_right()) {
+            set_position(manager, index, {f32(play_edge_left() + 1), new_pos.y})
         }
-        if pos.y <= f32(play_edge_top()) {
-            set_position(manager, index, {pos.x, f32(play_edge_bottom() - 1)})
-        } else if pos.y >= f32(play_edge_bottom()) {
-            set_position(manager, index, {pos.x, f32(play_edge_top() + 1)})
+        if new_pos.y <= f32(play_edge_top()) {
+            set_position(manager, index, {new_pos.x, f32(play_edge_bottom() - 1)})
+        } else if new_pos.y >= f32(play_edge_bottom()) {
+            set_position(manager, index, {new_pos.x, f32(play_edge_top() + 1)})
         }
-
-        if ship_state^ != .Normal {
-            continue
+    }
+    for index_to_destroy in entities_to_destroy_behavioral {
+        id := sa.get(manager.entities, index_to_destroy)
+        shooter := get_shooter(manager, index_to_destroy)
+        if shooter == .Ship {
+            g_mem.ship_active_bullets -= 1
         }
-        // Collsions against ship
-        if entity_type == .Asteroid_Small || entity_type == .Asteroid_Medium || entity_type == .Asteroid_Large {
-            ship_position := get_position(manager, get_player_index())
-            ship_radius := get_radius_physics(manager, get_player_index())
-            entity_radius := get_radius_physics(manager, index)
-            if rl.CheckCollisionCircles(pos, entity_radius, ship_position, ship_radius) {
-                ship_health := get_health(manager, index)
-
-                if ship_health - 1 <= 0 {
-                    if !rl.IsSoundPlaying(sounds[.Death]) {
-                        rl.PlaySound(sounds[.Death])
-                    }
-                    g_mem.lives -= 1
-                    ship_state^ = .Death
-                }
-
-                if !rl.IsSoundPlaying(sounds[.Harm]) {
-                    rl.PlaySound(sounds[.Harm])
-                }
-                set_health(manager,index,ship_health-1)
-            }
-        }
-        // Collisions with bullets
-        if entity_type == .Bullet {
-            for index_b in 0..<get_active_entity_count(manager^) {
-                entity_type_b := get_entity_type(manager, index_b)
-                if entity_type_b == .Asteroid_Small || entity_type_b == .Asteroid_Medium || entity_type_b == .Asteroid_Large {
-                    aster_index := index_b
-                    aster_radius := get_radius_physics(manager, aster_index)
-                    aster_position := get_position(manager, aster_index)
-                    bullet_radius := get_radius_physics(manager, index)
-
-                    if rl.CheckCollisionCircles(pos, bullet_radius, aster_position, aster_radius) {
-                        // Don't re-destroy bullets already slated for destruction
-                        is_slated_destruction := false
-                        for destroy_index in entities_to_destroy {
-                            if index == destroy_index {
-                                is_slated_destruction = true
-                                break
-                            }
-                        }
-                        if !is_slated_destruction {
-                            rl.PlaySound(sounds[.Bullet_Impact])
-                            append(&entities_to_destroy, index)
-                        }
-
-                        // asteroid resolution
-                        health := get_health(manager, aster_index)
-                        if health - 1 <= 0 {
-                            aster_velocity := get_velocity(manager, aster_index)
-                            rl.PlaySound(sounds[.Asteroid_Explode])
-
-                            #partial switch entity_type_b {
-                            case .Asteroid_Small:
-                                increment_score(20)
-
-                            case .Asteroid_Medium:
-                                increment_score(50)
-                                vel_a := jiggle_asteroid_velocity(aster_velocity)
-                                vel_b := jiggle_asteroid_velocity(aster_velocity)
-                                vel_c := jiggle_asteroid_velocity(aster_velocity)
-                                small_positions := spawn_positions_destroyed_medium_asteroid(aster_position, aster_velocity)
-                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[0], vel = vel_a})
-                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[1], vel = vel_b})
-                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[2], vel = vel_c})
-
-                            case .Asteroid_Large:
-                                increment_score(100)
-                                vel_a := jiggle_asteroid_velocity(aster_velocity)
-                                vel_b := jiggle_asteroid_velocity(aster_velocity)
-                                med_positions := spawn_positions_destroyed_large_asteroid (aster_position, aster_velocity)
-                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[0], vel = vel_a})
-                                append(&asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[1], vel = vel_b})
-                            }
-                            if get_score() > (get_extra_life_count() + 1) * 10000 {
-                                increment_extra_life_count()
-                                ship_health := get_health(manager, index)
-                                set_health(manager, index, ship_health + 1)
-                            }
-                            append(&entities_to_destroy, aster_index)
-                        }
-                    }
-                }
-            }
-        }
-
-        if entity_type == .Bullet {
-            lifespan := get_lifespan(manager, index)
-            lifespan -= dt
-			if lifespan <= 0 {
-                append(&entities_to_destroy, index)
-			} else {
-                set_lifespan(manager, index, lifespan)
-            }
-        }
-	}
-    for index in entities_to_destroy {
-        id := sa.get(manager.entities, index)
         destroy_entity(manager, id)
     }
+}
+
+handle_collisions :: proc(manager: ^Entity_Manager) {
+    n_active_entities := get_active_entity_count(manager^)
+
+    entities_to_destroy: [dynamic]int // uses index
+    defer delete(entities_to_destroy)
+    asteroids_to_spawn: [dynamic]Spawn_Asteroid_Data
+    defer delete(asteroids_to_spawn)
+
+    // TODO: active entities is changing...????
+    for index_a in 0..<n_active_entities-1 {
+        // skip if a destroyed
+        is_destroyed_a := false
+        for id in entities_to_destroy {
+            if index_a == id {
+                is_destroyed_a = true
+                break
+            }
+        }
+        if is_destroyed_a do continue
+
+        for index_b in (index_a + 1)..<n_active_entities {
+            // skip if b destroyed
+            is_destroyed_b := false
+            for id in entities_to_destroy {
+                if index_b == id {
+                    is_destroyed_b = true
+                    break
+                }
+            }
+            if is_destroyed_b do continue
+
+            pos_a := get_position(manager, index_a)
+            pos_b := get_position(manager, index_b)
+            radius_a := get_radius_physics(manager, index_a)
+            radius_b := get_radius_physics(manager, index_b)
+
+            if !rl.CheckCollisionCircles(pos_a, radius_a, pos_b, radius_b) {
+                continue
+            }
+
+            // check is pair of entities specified, return as such
+            type_a := get_entity_type(manager, index_a)
+            type_b := get_entity_type(manager, index_b)
+
+            is_some_ship := type_a == .Ship && type_b == .Bullet
+            is_some_bullet := type_a == .Bullet || type_b == .Bullet
+
+            // Ship collisions
+            if is_some_ship {
+                is_type_a_ship := type_a == .Ship
+                other_index := is_type_a_ship ? index_b : index_a
+                other_type := is_type_a_ship ? type_b : type_a
+
+                switch other_type {
+                case .Asteroid_Large, .Asteroid_Medium, .Asteroid_Small:
+                    aster_position := get_position(manager, other_index)
+                    kill_asteroid(manager, &asteroids_to_spawn, &entities_to_destroy, other_type, other_index, .None,  aster_position)
+                        kill_ship()
+                case .Ufo_Big, .Ufo_Small:
+                    ufo_position := get_position(manager, other_index)
+                    kill_ufo(manager, &entities_to_destroy, other_type, other_index, ufo_position, .None)
+                        kill_ship()
+                case .Bullet:
+                    shooter := get_shooter(manager, other_index)
+                    if shooter == .Ship {
+                        continue
+                    } else {
+                        append(&entities_to_destroy, other_index)
+                        kill_ship()
+                    }
+                case .Ship, .None:
+                }
+                continue
+            }
+
+            is_some_asteroid: bool
+            if type_a == .Asteroid_Large || 
+                type_a == .Asteroid_Medium || 
+                type_a == .Asteroid_Small || 
+                type_b == .Asteroid_Large || 
+                type_b == .Asteroid_Medium || 
+                type_b == .Asteroid_Small {
+                is_some_asteroid = true
+            }
+
+            // Collide bullet and asteroid
+            if is_some_bullet && is_some_asteroid {
+                is_type_a_bullet := type_a == .Bullet
+                bullet_index := is_type_a_bullet ? index_a : index_b
+                aster_index := is_type_a_bullet ? index_b : index_a
+                aster_type := is_type_a_bullet ? type_b : type_a
+
+                shooter := get_shooter(manager, bullet_index)
+                if shooter == .Ship {
+                    g_mem.ship_active_bullets -= 1
+                }
+                append(&entities_to_destroy, bullet_index)
+
+                aster_position := get_position(manager, aster_index)
+                kill_asteroid(manager, &asteroids_to_spawn, &entities_to_destroy, aster_type, aster_index, shooter,  aster_position)
+
+                continue
+            }
+
+            is_some_ufo := type_a == .Ufo_Small || type_b == .Ufo_Small || type_a == .Ufo_Big || type_b == .Ufo_Big
+
+            // Collide bullet and ufo
+            if is_some_bullet && is_some_ufo {
+                is_type_a_bullet := type_a == .Bullet
+                bullet_index := is_type_a_bullet ? index_a : index_b
+                ufo_index := is_type_a_bullet ? index_b : index_a
+                ufo_type := is_type_a_bullet ? type_b : type_a
+                ufo_position := get_position(manager, ufo_index)
+
+                shooter := get_shooter(manager, bullet_index)
+                if shooter == .Ship {
+                    g_mem.ship_active_bullets -= 1
+                }
+                append(&entities_to_destroy, bullet_index)
+
+                kill_ufo(manager, &entities_to_destroy, ufo_type, ufo_index, ufo_position, shooter)
+                continue
+            }
+
+            if is_some_ufo && is_some_asteroid {
+                is_type_a_ufo := type_a == .Ufo_Small || type_a == .Ufo_Big
+                ufo_type := is_type_a_ufo ? type_a : type_b
+                ufo_index := is_type_a_ufo ? index_a : index_b
+                ufo_position := get_position(manager, ufo_index)
+                aster_index := is_type_a_ufo ? index_b : index_a
+                aster_type := is_type_a_ufo ? type_b : type_a
+                aster_position := get_position(manager, aster_index)
+                kill_ufo(manager, &entities_to_destroy, ufo_type, ufo_index, ufo_position, .None)
+                kill_asteroid(manager, &asteroids_to_spawn, &entities_to_destroy, aster_type, aster_index, .None,  aster_position)
+                continue
+            }
+        }
+    }
+
+    for index in entities_to_destroy {
+        id := sa.get(manager.entities, index)
+        shooter := get_shooter(manager, index)
+        if shooter == .Ship {
+            g_mem.ship_active_bullets -= 1
+        }
+        destroy_entity(manager, id)
+    }
+
     for data in asteroids_to_spawn {
         spawn_asteroid(data.type, data.pos, data.vel, manager)
     }
+
+
+
+    // Collisions with bullets
+    // if entity_type == .Bullet {
+    //     for index_b in 0..<get_active_entity_count(manager^) {
+    //         entity_type_b := get_entity_type(manager, index_b)
+    //         // TODO: against ship
+    //
+    //         if entity_type_b == .Ufo_Big || entity_type_b == .Ufo_Small {
+    //             if shooter == .Ufo {
+    //                 continue
+    //             }
+    //             ufo_index := index_b
+    //             ufo_radius := get_radius_physics(manager, ufo_index)
+    //             ufo_position := get_position(manager, ufo_index)
+    //             bullet_radius := get_radius_physics(manager, index)
+    //
+    //             if rl.CheckCollisionCircles(pos, bullet_radius, ufo_position, ufo_radius) {
+    //                 rl.PlaySound(sounds[.Asteroid_Explode])
+    //
+    //                 // Don't re-destroy bullets already slated for destruction
+    //                 is_slated_destruction := false
+    //                 for destroy_index in entities_to_destroy {
+    //                     if index == destroy_index {
+    //                         is_slated_destruction = true
+    //                         break
+    //                     }
+    //                 }
+    //                 if !is_slated_destruction {
+    //                     rl.PlaySound(sounds[.Bullet_Impact])
+    //                     append(&entities_to_destroy, index)
+    //                 }
+    //
+    //                 if shooter == .Ship {
+    //                     if entity_type_b == .Ufo_Big {
+    //                         increment_score(200)
+    //                     } else if entity_type_b == .Ufo_Small {
+    //                         increment_score(500)
+    //                     }
+    //                 }
+    //                 append(&entities_to_destroy, ufo_index)
+    //             }
+    //         } else if entity_type_b == .Asteroid_Small || 
+    //             entity_type_b == .Asteroid_Medium || 
+    //             entity_type_b == .Asteroid_Large {
+    //
+    //             aster_index := index_b
+    //             aster_radius := get_radius_physics(manager, aster_index)
+    //             aster_position := get_position(manager, aster_index)
+    //             bullet_radius := get_radius_physics(manager, index)
+    //
+    //             if rl.CheckCollisionCircles(pos, bullet_radius, aster_position, aster_radius) {
+    //                 // Don't re-destroy bullets already slated for destruction
+    //                 is_slated_destruction := false
+    //                 for destroy_index in entities_to_destroy {
+    //                     if index == destroy_index {
+    //                         is_slated_destruction = true
+    //                         break
+    //                     }
+    //                 }
+    //                 if !is_slated_destruction {
+    //                     rl.PlaySound(sounds[.Bullet_Impact])
+    //                     append(&entities_to_destroy, index)
+    //                 }
+    //
+    //                 kill_asteroid(manager, &asteroids_to_spawn, &entities_to_destroy, entity_type_b, aster_index, shooter, aster_position)
+    //             }
+    //         }
+    //     }
+    // }
+
+
+}
+
+kill_ship :: proc() {
+    if !rl.IsSoundPlaying(sounds[.Death]) {
+        rl.PlaySound(sounds[.Death])
+    }
+    g_mem.lives -= 1
+    ship_state^ = .Death
+}
+
+identify_pair_entity_types :: proc(spec_a: Entity_Type, spec_b: Entity_Type, rcvd_a: Entity_Type, rcvd_b: Entity_Type) -> (is_pair: bool, is_ordered: bool) {
+    if spec_a == rcvd_a && spec_b == rcvd_b {
+        return true, true
+    } else if spec_a == rcvd_b && spec_b == rcvd_a {
+        return true, false
+    }
+    return false, false
+
+}
+
+
+kill_asteroid :: proc (manager: ^Entity_Manager, asteroids_to_spawn: ^[dynamic]Spawn_Asteroid_Data, entities_to_destroy: ^[dynamic]int, type: Entity_Type, aster_index: int, shooter: Shooter_Type, aster_position: Vec2) {
+    aster_velocity := get_velocity(manager, aster_index)
+    rl.PlaySound(sounds[.Asteroid_Explode])
+
+    #partial switch type {
+    case .Asteroid_Small:
+        if shooter == .Ship {
+            increment_score(20)
+        }
+
+    case .Asteroid_Medium:
+        if shooter == .Ship {
+            increment_score(50)
+        }
+        vel_a := jiggle_asteroid_velocity(aster_velocity)
+        vel_b := jiggle_asteroid_velocity(aster_velocity)
+        vel_c := jiggle_asteroid_velocity(aster_velocity)
+        small_positions := spawn_positions_destroyed_medium_asteroid(aster_position, aster_velocity)
+        append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[0], vel = vel_a})
+        append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[1], vel = vel_b})
+        append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[2], vel = vel_c})
+
+    case .Asteroid_Large:
+        if shooter == .Ship {
+            increment_score(100)
+        }
+        vel_a := jiggle_asteroid_velocity(aster_velocity)
+        vel_b := jiggle_asteroid_velocity(aster_velocity)
+        med_positions := spawn_positions_destroyed_large_asteroid (aster_position, aster_velocity)
+        append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[0], vel = vel_a})
+        append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[1], vel = vel_b})
+    }
+    append(entities_to_destroy, aster_index)
+}
+
+kill_ufo :: proc (manager: ^Entity_Manager, entities_to_destroy: ^[dynamic]int, ufo_type: Entity_Type, ufo_index: int, ufo_position: Vec2, shooter: Shooter_Type) {
+    rl.PlaySound(sounds[.Asteroid_Explode])
+    if shooter == .Ship {
+        if ufo_type == .Ufo_Big {
+            increment_score(200)
+        }
+        if ufo_type == .Ufo_Small {
+            increment_score(500)
+        }
+    }
+    append(entities_to_destroy, ufo_index)
 }
 
 get_entity_type :: proc(manager: ^Entity_Manager, idx: int) -> Entity_Type {
@@ -1427,6 +1684,14 @@ set_shot_timer :: proc(manager: ^Entity_Manager, idx: int, shot_timer: Timer) {
     manager.shot_timers[idx] = shot_timer
 }
 
+get_shooter :: proc(manager: ^Entity_Manager, idx: int) -> Shooter_Type {
+    return manager.shooters[idx]
+}
+
+set_shooter :: proc(manager: ^Entity_Manager, idx: int, shooter: Shooter_Type) {
+    manager.shooters[idx] = shooter
+}
+
 draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
     rl.DrawPolyLines(pos, N_ASTEROID_SIDES, radius, rot,  color)
 }
@@ -1434,6 +1699,7 @@ draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
 get_score :: proc() -> i32 {
     return g_mem.score
 }
+
 draw_score:: proc() {
     rl.DrawText(
         fmt.ctprintf(
@@ -1469,36 +1735,38 @@ draw_debug_ui :: proc() {
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v\nplay_area_top: %v\nplay_area_bot:%v\nplay_area_left: %v\nplay_area_right: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt: %v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v\nship_active_bulet: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
                 LOGICAL_H,
                 LOGICAL_W,
+                rl.GetFrameTime(),
                 rl.GetTime(),
                 get_position(g_mem.manager, 0),
                 vel,
                 speed,
                 get_health(g_mem.manager, 0),
                 get_active_entity_count(g_mem.manager^),
-                sa.slice(&g_mem.entities)[:sa.len(g_mem.entities)],
+                sa.slice(&g_mem.entities)[:get_active_entity_count(g_mem.manager^)],
                 sa.slice(&g_mem.free_list)[:sa.len(g_mem.free_list)],
                 game_state^,
                 ship_state^,
-                play_edge_top(),
-                play_edge_bottom(),
-                play_edge_left(),
-                play_edge_right(),
+                g_mem.ship_active_bullets,
             ),
             3, 3, 12, rl.WHITE,
         )
         rl.DrawText(
             fmt.ctprintf(
-                "cam.tar: %v\ncam.off: %v\nscreen_left: %v\nscreen_right: %v",
+                "cam.tar: %v\ncam.off: %v\nscreen_left: %v\nscreen_right: %v\nplay_area_top: %v\nplay_area_bot:%v\nplay_area_left: %v\nplay_area_right: %v",
                 game_camera().target,
                 game_camera().offset,
                 screen_left(),
                 screen_right(),
+                play_edge_top(),
+                play_edge_bottom(),
+                play_edge_left(),
+                play_edge_right(),
             ),
             i32(rl.GetScreenWidth() - 210), 3, 12, rl.WHITE,
         )
@@ -1541,7 +1809,6 @@ log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
 
 spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
     id := create_entity(manager, .Ship)
-
     set_component_data(manager, id, Component_Data{
         position = pos,
         rotation = rot,
@@ -1588,21 +1855,18 @@ spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2, manager: 
 }
 
 spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
-    id := create_entity(manager, .Bullet)
     ship_data, ship_ok := get_component_data(manager, get_player_id(), Component_Request_Data{
         rotation = true,
         position = true,
     })
     if !ship_ok {
         log_warn("Failed to spawn bullet because ship data nil")
-        destroy_entity(manager, id)
         return
     }
 
     ship_rotation, ok_rotation := ship_data.rotation.?
     if !ok_rotation {
         log_warn("Failed to spawn bullet because ship rotation nil")
-        destroy_entity(manager, id)
         return
     }
     rotation_vector := angle_radians_to_vec(ship_rotation)
@@ -1610,13 +1874,14 @@ spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
     ship_position, ok_position := ship_data.position.?
     if !ok_position {
         log_warn("Failed to spawn bullet because ship position nil")
-        destroy_entity(manager, id)
         return
     }
 
     pos := ship_position + rotation_vector * SHIP_R
     velocity := rotation_vector * BULLET_SPEED
-    spawn_bullet(manager, pos, velocity)
+
+    g_mem.ship_active_bullets += 1
+    spawn_bullet(manager, pos, velocity, .Ship)
 }
 
 angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
@@ -1776,14 +2041,12 @@ reset_gameplay_data :: proc() {
     entity_m.rendering^ = {}
     entity_m.gameplay^ = {}
 
-
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
 }
 
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
     g_mem.beat_sound_timer.interval = INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.86, f32(beat_level))
-    // g_mem.beat_sound_timer.accum = g_mem.beat_sound_timer.interval
 }
 
 is_out_of_bounds :: proc(pos: Vec2) -> bool {
@@ -1851,7 +2114,7 @@ process_ufo_shot :: proc(entitym: ^Entity_Manager, index: int, dt: f32, shot_tim
                 shot_dir = linalg.normalize0(d_pos)
             }
 
-            spawn_bullet(entitym, ufo_pos, shot_dir * BULLET_SPEED)
+            spawn_bullet(entitym, ufo_pos, shot_dir * BULLET_SPEED, .Ufo)
             rl.PlaySound(sounds[.Fire])
         }
         restart_timer(&shot_timer)
@@ -1859,7 +2122,7 @@ process_ufo_shot :: proc(entitym: ^Entity_Manager, index: int, dt: f32, shot_tim
     set_shot_timer(entitym, index, shot_timer)
 }
 
-spawn_bullet :: proc(manager: ^Entity_Manager, pos: Vec2, vel: Vec2) {
+spawn_bullet :: proc(manager: ^Entity_Manager, pos: Vec2, vel: Vec2, shooter: Shooter_Type) {
     id := create_entity(manager, .Bullet)
     data_in := Component_Data{
         position = pos,
@@ -1869,6 +2132,30 @@ spawn_bullet :: proc(manager: ^Entity_Manager, pos: Vec2, vel: Vec2) {
         color = rl.RAYWHITE,
         render_type = Render_Type.Bullet,
         lifespan = BULLET_LIFESPAN,
+        shooter = shooter,
+        radius_physics = BULLET_PHYSICS_RADIUS,
     }
     set_component_data(manager, id, data_in)
+}
+
+reset_entity_components :: proc(manager: ^Entity_Manager, index: int) {
+    // Reset all component data to default values
+    manager.positions[index] = Vec2{0, 0}
+    manager.velocities[index] = Vec2{0, 0}
+    manager.rotations[index] = 0
+    manager.masses[index] = 0
+    manager.radii_physics[index] = 0
+    manager.damages[index] = 0
+    manager.healths[index] = 0
+    manager.lifespans[index] = 0
+    manager.types_render[index] = Render_Type.None // Or some sensible default
+    manager.radii_render[index] = 0
+    manager.colors[index] = rl.RAYWHITE
+    manager.scales[index] = 1
+    manager.vertices[index] = {}
+    manager.visual_rotation_rates[index] = 0
+    manager.is_visibles[index] = false
+    manager.move_timers[index] = Timer{}
+    manager.shot_timers[index] = Timer{}
+    manager.shooters[index] = .None
 }
