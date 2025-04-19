@@ -23,27 +23,40 @@ MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 15
 
-BIG_UFO_RADIUS :: 25
-SMALL_UFO_RADIUS :: 15
-
 SHIP_R :: 22
 SHIP_ROTATION_MAGNITUDE :: 5
 SHIP_MAX_SPEED :: 350
 THRUST_MAGNITUDE :: 6
 SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
+TIMER_INTERVAL_THRUST_DRAW :: 0.1
+
+TIMER_INTERVAL_DEATH :: 1
+TIMER_INTERVAL_SPAWN :: 2
+TIMER_INTERVAL_BETWEEN_LEVELS :: 1
 
 BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
 BULLET_LIFESPAN_SPEED_RATIO :: 0.0018
 BULLET_LIFESPAN :: BULLET_SPEED * BULLET_LIFESPAN_SPEED_RATIO
 
-TIMER_INTERVAL_DEATH :: 1
-TIMER_INTERVAL_SPAWN :: 2
-TIMER_INTERVAL_BETWEEN_LEVELS :: 1
+BIG_UFO_RADIUS :: 25
+BIG_UFO_SPEED :: 150
+TIMER_INTERVAL_UFO_BIG_MOVE :: 0.5
+BIG_UFO_CHANCE_TO_MOVE :: 1
+TIMER_INTERVAL_UFO_BIG_SHOOT :: 1
+BIG_UFO_CHANCE_TO_SHOOT :: 0.4
+
+SMALL_UFO_RADIUS :: 15
+SMALL_UFO_SPEED :: 175
+TIMER_INTERVAL_UFO_SMALL_MOVE :: 0.2
+SMALL_UFO_CHANCE_TO_MOVE :: 1
+TIMER_INTERVAL_UFO_SMALL_SHOOT :: 0.5
+SMALL_UFO_CHANCE_TO_SHOOT :: 0.6
+
 TIMER_INTERVAL_BEAT :: 12
 TIMER_INTERVAL_UFO :: 3
 INIT_TIMER_INTERVAL_BEAT_SOUND :: 1
-TIMER_INTERVAL_THRUST_DRAW :: 0.1
+
 Game_Memory :: struct {
 	player_id: Entity_Id,
 	run: bool,
@@ -109,7 +122,6 @@ Entity_Manager :: struct {
 	types: [MAX_ENTITIES]Entity_Type, // CSDR moving this under gameplay or other?? the data flow (set/get) is disjointed
 	entity_to_index: map[Entity_Id]int,
 
-    // TODO: CSDR moving to a Component_Manager
 	using physics: ^Physics_Data,
 	using rendering: ^Rendering_Data,
 	using gameplay: ^Gameplay_Data,
@@ -138,6 +150,8 @@ Gameplay_Data :: struct {
     damages: [MAX_ENTITIES]i32,
     healths: [MAX_ENTITIES]i32,
 	lifespans: [MAX_ENTITIES]f32,
+    shot_timers: [MAX_ENTITIES]Timer,
+    move_timers: [MAX_ENTITIES]Timer,
 }
 
 MAX_RENDER_VERTICES :: 8
@@ -277,21 +291,44 @@ spawner_ufo :: proc(beat_level: i32) {
 spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, entity_m: ^Entity_Manager) {
     id := create_entity(entity_m, entity_type)
     radius: f32
+    move_timer: Timer
+    shot_timer: Timer
+    speed: f32
     #partial switch entity_type {
     case .Ufo_Big:
         radius = BIG_UFO_RADIUS
+        move_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_BIG_MOVE,
+            accum = TIMER_INTERVAL_UFO_BIG_MOVE,
+        }
+        shot_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_BIG_SHOOT,
+            accum = TIMER_INTERVAL_UFO_BIG_SHOOT,
+        }
+        speed = BIG_UFO_SPEED
     case .Ufo_Small:
         radius = SMALL_UFO_RADIUS
+        move_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_SMALL_MOVE,
+            accum = TIMER_INTERVAL_UFO_SMALL_MOVE,
+        }
+        shot_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_SMALL_SHOOT,
+            accum = TIMER_INTERVAL_UFO_SMALL_SHOOT,
+        }
+        speed = SMALL_UFO_SPEED
     }
     data_in := Component_Data{
         position = pos,
-        velocity = is_moving_right ? Vec2{100,0} : Vec2{-100,0},
+        velocity = is_moving_right ? Vec2{speed,0} : Vec2{-speed,0},
         radius_physics = radius * 0.8,
         render_type = Render_Type.Ufo_Big,
         color = rl.RAYWHITE,
         radius_render = radius,
         health = 1,
         is_visible = true,
+        move_timer = move_timer,
+        shot_timer = shot_timer,
     }
     set_component_data(entity_m, id, data_in)
 
@@ -743,7 +780,6 @@ draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
 
 rotate_point :: proc(point: Vec2, center: Vec2, rot: f32 /* rad */) -> Vec2 {
     delta := point - center
-    // TODO: work on this, flipped in between sign
     point_rotated := Vec2{
         delta.x * math.cos(rot) - delta.y * math.sin(rot) + center.x,
         delta.x * math.sin(rot) + delta.y * math.cos(rot) + center.y,
@@ -801,6 +837,8 @@ Component_Data :: struct {
     vertices: Maybe(Render_Vertices_Component),
     visual_rotation_rate: Maybe(f32),
     is_visible: Maybe(bool),
+    move_timer: Maybe(Timer),
+    shot_timer: Maybe(Timer),
 }
 
 Component_Request_Data :: struct {
@@ -819,6 +857,8 @@ Component_Request_Data :: struct {
     visual_rotation_rate: bool,
     is_visible: bool,
     scale: bool,
+    move_timer: bool,
+    shot_timer: bool,
 }
 
 get_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Component_Request_Data) -> (Component_Data, bool) {
@@ -924,6 +964,16 @@ set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Compon
     } else {
         set_is_visible(manager, idx, true)
     }
+    if val, ok := data.move_timer.?; ok {
+        set_move_timer(manager, idx, val)
+    } else {
+        set_move_timer(manager, idx, Timer{})
+    }
+    if val, ok := data.shot_timer.?; ok {
+        set_shot_timer(manager, idx, val)
+    } else {
+        set_shot_timer(manager, idx, Timer{})
+    }
     if val, ok := data.scale.?; ok {
         set_scale(manager, idx, val)
     } else {
@@ -932,6 +982,7 @@ set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Compon
     return true
 }
 
+// NOTE: remember to update this for every new component!
 _pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Type, Component_Data, Entity_Id, int) {
     last_index := get_last_entity_index(manager^)
     type := get_entity_type(manager, last_index)
@@ -952,6 +1003,8 @@ _pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Type, Component_Da
         visual_rotation_rate = manager.visual_rotation_rates[last_index],
         is_visible = manager.is_visibles[last_index],
         render_type = manager.rendering.types_render[last_index],
+        move_timer = manager.move_timers[last_index],
+        shot_timer = manager.shot_timers[last_index],
     }
     return type, data, last_id, last_index
 }
@@ -1098,11 +1151,12 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
         case .Ufo_Big, .Ufo_Small:
             vel := get_velocity(manager, index)
             pos := get_position(manager, index)
+            move_timer := get_move_timer(manager, index)
+            process_ufo_move(manager, index, dt, move_timer, vel, entity_type)
+            shot_timer := get_shot_timer(manager, index)
+            process_ufo_shot(manager, index, dt, shot_timer, entity_type, pos)
             new_pos := pos + vel * dt
             if is_out_of_bounds(new_pos) {
-                pr_span("")
-                pr("ufo destroyed pos", new_pos)
-                pr_span("")
                 append(&entities_to_destroy, index)
             } else {
                 set_position(manager, index, new_pos)
@@ -1314,7 +1368,6 @@ get_vertices :: proc(manager: ^Entity_Manager, idx: int) -> Render_Vertices_Comp
 }
 
 set_vertices :: proc(manager: ^Entity_Manager, idx: int, vertices: Render_Vertices_Component) {
-    // TODO: check this works, ship is appending more vertices
     manager.rendering.vertices[idx] = vertices
 }
 
@@ -1356,6 +1409,22 @@ get_scale :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
 
 set_scale :: proc(manager: ^Entity_Manager, idx: int, scale: f32) {
     manager.scales[idx] = scale
+}
+
+get_move_timer :: proc(manager: ^Entity_Manager, idx: int) -> Timer {
+    return manager.move_timers[idx]
+}
+
+set_move_timer :: proc(manager: ^Entity_Manager, idx: int, move_timer: Timer) {
+    manager.move_timers[idx] = move_timer
+}
+
+get_shot_timer :: proc(manager: ^Entity_Manager, idx: int) -> Timer {
+    return manager.shot_timers[idx]
+}
+
+set_shot_timer :: proc(manager: ^Entity_Manager, idx: int, shot_timer: Timer) {
+    manager.shot_timers[idx] = shot_timer
 }
 
 draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
@@ -1547,17 +1616,7 @@ spawn_bullet_from_ship :: proc(manager: ^Entity_Manager) {
 
     pos := ship_position + rotation_vector * SHIP_R
     velocity := rotation_vector * BULLET_SPEED
-
-    data_in := Component_Data{
-        position = pos,
-        velocity = velocity,
-        damage = 1,
-        is_visible = true,
-        color = rl.RAYWHITE,
-        render_type = Render_Type.Bullet,
-        lifespan = BULLET_LIFESPAN,
-    }
-    set_component_data(manager, id, data_in)
+    spawn_bullet(manager, pos, velocity)
 }
 
 angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
@@ -1720,15 +1779,6 @@ reset_gameplay_data :: proc() {
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)), g_mem.manager)
     g_mem.player_id = player_id
-
-    // TODO: use spawner elsewhere
-    spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
-
-    spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
-    spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
 }
 
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
@@ -1738,4 +1788,87 @@ update_beat_sound_timer_with_level :: proc(beat_level: i32) {
 
 is_out_of_bounds :: proc(pos: Vec2) -> bool {
     return pos.x < f32(play_edge_left()) || pos.x > f32(play_edge_right()) || pos.y < f32(play_edge_top()) || pos.y > f32(play_edge_bottom())
+}
+
+process_ufo_move :: proc(entitym: ^Entity_Manager, index: int, dt: f32, move_timer: Timer, vel: Vec2, type: Entity_Type) {
+    move_timer := move_timer
+    tick_timer(&move_timer, dt)
+    if is_timer_done(move_timer) {
+        // roll for move
+        chance_to_move : f32 = type == .Ufo_Big ? BIG_UFO_CHANCE_TO_MOVE : SMALL_UFO_CHANCE_TO_MOVE
+
+        rgn := rand.float32()
+        if rgn < chance_to_move {
+            speed: f32
+            if type == .Ufo_Big {
+                speed = BIG_UFO_SPEED
+            } else if type == .Ufo_Small {
+                speed = SMALL_UFO_SPEED
+            }
+            // bias direction to level. direction based on ratio, avoid rolling again
+            // 75% level, 12.5 up/down
+            // level
+            if rgn < chance_to_move * 0.75 {
+                new_vel := vel.x >= 0 ? Vec2{speed, 0} : Vec2{-speed, 0 }
+                set_velocity(entitym, index, new_vel)
+
+            // up diag
+            } else if rgn < chance_to_move * 0.875 {
+                dir := vel.x >= 0 ? Vec2{1, -1} : Vec2{-1, -1}
+                new_vel :=  dir * speed
+                set_velocity(entitym, index, new_vel)
+
+            // down diag
+            } else if rgn < chance_to_move {
+                dir := vel.x >= 0 ? Vec2{1, 1} : Vec2{-1, 1}
+                new_vel :=  dir * speed
+                set_velocity(entitym, index, new_vel)
+            }
+        }
+        restart_timer(&move_timer)
+        // m := Timer{ accum = TIMER_INTERVAL_UFO_BIG_MOVE, interval = TIMER_INTERVAL_UFO_BIG_MOVE}
+    }
+    set_move_timer(entitym, index, move_timer)
+}
+
+process_ufo_shot :: proc(entitym: ^Entity_Manager, index: int, dt: f32, shot_timer: Timer, type: Entity_Type, ufo_pos: Vec2) {
+    shot_timer := shot_timer
+    tick_timer(&shot_timer, dt)
+    if is_timer_done(shot_timer) {
+        chance_to_shoot : f32 = type == .Ufo_Big ? BIG_UFO_CHANCE_TO_SHOOT : SMALL_UFO_CHANCE_TO_SHOOT
+        rgn := rand.float32()
+        if rgn < chance_to_shoot {
+
+            // Shot direction
+            player_pos := get_position(entitym, get_player_index())
+            shot_dir: Vec2
+            if type == .Ufo_Big {
+                rgn_dir := rand.float32()
+                angle_radians := 2 * math.PI * rgn_dir
+                shot_dir = {math.cos(angle_radians), math.sin(angle_radians)}
+            } else if type == .Ufo_Small {
+                d_pos := player_pos - ufo_pos
+                shot_dir = linalg.normalize0(d_pos)
+            }
+
+            spawn_bullet(entitym, ufo_pos, shot_dir * BULLET_SPEED)
+            rl.PlaySound(sounds[.Fire])
+        }
+        restart_timer(&shot_timer)
+    }
+    set_shot_timer(entitym, index, shot_timer)
+}
+
+spawn_bullet :: proc(manager: ^Entity_Manager, pos: Vec2, vel: Vec2) {
+    id := create_entity(manager, .Bullet)
+    data_in := Component_Data{
+        position = pos,
+        velocity = vel,
+        damage = 1,
+        is_visible = true,
+        color = rl.RAYWHITE,
+        render_type = Render_Type.Bullet,
+        lifespan = BULLET_LIFESPAN,
+    }
+    set_component_data(manager, id, data_in)
 }
