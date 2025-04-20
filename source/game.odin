@@ -19,6 +19,8 @@ LOGICAL_H :: 750
 PHYSICS_HZ :: 120
 FIXED_DT :: 1 / PHYSICS_HZ
 
+TIMER_INTERVAL_INTRO_MESSAGE :: 2
+
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 15
@@ -29,7 +31,6 @@ SHIP_MAX_SPEED :: 350
 THRUST_MAGNITUDE :: 6
 SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
 TIMER_INTERVAL_THRUST_DRAW :: 0.075
-
 
 TIMER_INTERVAL_TELEPORT :: 1
 TIMER_INTERVAL_DEATH :: 1
@@ -83,9 +84,11 @@ Game_Memory :: struct {
     ship_active_bullets: i32,
     teleport_timer: Timer,
     level: i32,
+    intro_timer: Timer,
 }
 
 Game_State :: enum {
+    Intro,
     Between_Levels,
     Play,
     Game_Over,
@@ -211,7 +214,7 @@ set_game_over :: proc() {
 }
 
 eval_game_over :: proc() {
-    if rl.IsKeyPressed(.V) {
+    if rl.IsKeyPressed(.V) && DEBUG {
         set_game_over()
     }
     if game_state^ == .Game_Over {
@@ -231,9 +234,17 @@ update :: proc() {
 
     dt := rl.GetFrameTime()
 
+    if g_mem.game_state == .Intro {
+        tick_timer(&g_mem.intro_timer, dt)
+        if is_timer_done(g_mem.intro_timer) {
+            g_mem.game_state = .Between_Levels
+            restart_timer(&g_mem.intro_timer)
+        }
+        return
+    }
+
     update_entities(entity_m, dt)
     handle_collisions(g_mem.manager)
-
 
     // lifespans
     bullets_with_expired_lifespans: [dynamic]int
@@ -347,7 +358,6 @@ spawner_ufo :: proc(beat_level: i32, dt: f32) {
 
 spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, entity_m: ^Entity_Manager) {
     id := create_entity(entity_m, entity_type)
-    pr("spawn ufo of type", entity_type)
     radius: f32
     move_timer: Timer
     shot_timer: Timer
@@ -468,6 +478,7 @@ draw :: proc() {
 
 	rl.EndDrawing()
 }
+
 // Screen edges are all within play area. The drawn boundary line currently within of play area
 // TODO: make boundary line (draw_screen_edges) outside of play area
 // more aptly named, play_edge_left/top...
@@ -531,7 +542,7 @@ game_init :: proc() {
     g_mem.manager = manager
 	g_mem.run = true
     g_mem.ship_state = .Normal
-    g_mem.game_state = .Between_Levels
+    g_mem.game_state = .Intro
     g_mem.lives = 3
     g_mem.level = 1
     g_mem.death_timer = Timer {
@@ -566,6 +577,10 @@ game_init :: proc() {
     g_mem.teleport_timer = Timer {
         accum = TIMER_INTERVAL_TELEPORT,
         interval = TIMER_INTERVAL_TELEPORT,
+    }
+    g_mem.intro_timer = Timer {
+        accum = TIMER_INTERVAL_INTRO_MESSAGE,
+        interval = TIMER_INTERVAL_INTRO_MESSAGE,
     }
 
     sounds = &g_mem.sounds
@@ -1120,8 +1135,8 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             set_velocity(manager, index, {})
         }
 
-        is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
-        is_thrusting_up := rl.IsKeyReleased(.DOWN) || rl.IsKeyReleased(.S)
+        is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W)
+        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)
         if is_thrusting {
             tick_timer(&g_mem.thrust_draw_timer, dt)
             if is_timer_done(g_mem.thrust_draw_timer) {
@@ -1190,11 +1205,6 @@ Spawn_Asteroid_Data :: struct {
 }
 
 update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
-    // pr("entities:",sa.slice(&manager.entities)[:(sa.len(manager.entities))])
-    // pr("entity_to_idx:",manager.entity_to_index)
-    // pr("free_list:",sa.slice(&manager.free_list)[:(sa.len(manager.free_list))])
-    // pr_span("")
-
     entities_to_destroy_behavioral: [dynamic]int
     defer delete(entities_to_destroy_behavioral)
 
@@ -1632,14 +1642,13 @@ get_score :: proc() -> i32 {
     return g_mem.score
 }
 
-draw_game_over :: proc () {
-    rl.DrawText(
-        fmt.ctprint("GAME OVER\nPress SPACE to play again"),
-        WINDOW_W / 2, WINDOW_H / 2, 40, rl.WHITE,
-    )
-}
-
 draw_ui :: proc() {
+    if g_mem.game_state == .Intro {
+        rl.DrawText(
+            fmt.ctprint("Thruster = W/Up\n\nRotate = A,D/Left,Right arrows\n\nFire = Space\n\nTeleport = Shift"),
+            LOGICAL_W / 3, LOGICAL_H * 3 / 5, 30, rl.WHITE,
+        )
+    }
     rl.DrawText(
         fmt.ctprintf(
             "%v",
@@ -1651,7 +1660,10 @@ draw_ui :: proc() {
         draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
     }
     if game_state^ == .Game_Over {
-        draw_game_over()
+        rl.DrawText(
+            fmt.ctprint("GAME OVER\nPress SPACE to play again"),
+            WINDOW_W / 2, WINDOW_H / 2, 40, rl.WHITE,
+        )
     }
 }
 
