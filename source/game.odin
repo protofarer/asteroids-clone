@@ -90,6 +90,10 @@ Game_Memory :: struct {
 	run: bool,
     is_thrust_drawing: bool,
     is_beat_sound_hi: bool,
+    is_gesture_tap: bool,
+    is_gesture_hold: bool,
+    is_gesture_hold_right: bool,
+    is_gesture_hold_left: bool,
 }
 
 touch_pos: Vec2
@@ -173,11 +177,6 @@ Shooter_Type :: enum {
 }
 
 
-is_gesture_tap: bool
-is_gesture_hold: bool
-is_gesture_hold_right: bool
-is_gesture_hold_left: bool
-
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
@@ -198,10 +197,10 @@ update :: proc() {
 		g_mem.run = false
 	}
 
-    is_gesture_hold = false
-    is_gesture_hold_left = false
-    is_gesture_hold_right = false
-    is_gesture_tap = false
+    g_mem.is_gesture_hold = false
+    g_mem.is_gesture_hold_left = false
+    g_mem.is_gesture_hold_right = false
+    g_mem.is_gesture_tap = false
 
     // Gestures
     last_gesture = current_gesture
@@ -212,14 +211,14 @@ update :: proc() {
     if valid_touch {
         switch {
         case .TAP in current_gesture:
-            is_gesture_tap = true
+            g_mem.is_gesture_tap = true
         
         case .HOLD in current_gesture, .DRAG in current_gesture:
-            is_gesture_hold = true
+            g_mem.is_gesture_hold = true
             if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                is_gesture_hold_left = true
+                g_mem.is_gesture_hold_left = true
             } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                is_gesture_hold_right = true
+                g_mem.is_gesture_hold_right = true
             }
         }
     }
@@ -1008,9 +1007,8 @@ update_ship :: proc(index: int) {
             set_velocity(index, {})
         }
 
-        is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || is_gesture_hold
-        // WARN: removed `|| !is_gesture_hold` below, todo later
-        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)  || !is_gesture_hold
+        is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || g_mem.is_gesture_hold
+        is_thrusting_up := (rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)) && !g_mem.is_gesture_hold
         if is_thrusting {
             if process_timer(&g_mem.thrust_draw_timer) {
                 g_mem.is_thrust_drawing = !g_mem.is_thrust_drawing
@@ -1025,14 +1023,14 @@ update_ship :: proc(index: int) {
         }
 
         d_rot: f32
-        if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) || is_gesture_hold_left {
+        if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) || g_mem.is_gesture_hold_left {
             d_rot = -SHIP_ROTATION_MAGNITUDE
         }
-        if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) || is_gesture_hold_right {
+        if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) || g_mem.is_gesture_hold_right {
             d_rot = SHIP_ROTATION_MAGNITUDE
         }
 
-        if rl.IsKeyPressed(.SPACE) || is_gesture_tap {
+        if rl.IsKeyPressed(.SPACE) || g_mem.is_gesture_tap {
             if g_mem.ship_active_bullets < SHIP_BULLET_COUNT_LIMIT {
                 spawn_bullet_from_ship()
                 rl.PlaySound(g_mem.sounds[.Fire])
@@ -1812,7 +1810,7 @@ eval_game_over :: proc() {
     }
 
     if g_mem.game_state == .Game_Over {
-        if rl.IsKeyPressed(.SPACE) || is_gesture_tap {
+        if rl.IsKeyPressed(.SPACE) || g_mem.is_gesture_tap {
             reset_gameplay_data()
         }
     }
