@@ -1646,7 +1646,7 @@ draw_ui :: proc() {
     if g_mem.game_state == .Intro {
         rl.DrawText(
             fmt.ctprint("Thruster = W/Up\n\nRotate = A,D/Left,Right arrows\n\nFire = Space\n\nTeleport = Shift"),
-            LOGICAL_W / 3, LOGICAL_H * 3 / 5, 30, rl.WHITE,
+            WINDOW_W / 3, WINDOW_H * 3 / 5, 30, rl.RAYWHITE,
         )
     }
     rl.DrawText(
@@ -1654,15 +1654,15 @@ draw_ui :: proc() {
             "%v",
             get_score(),
         ),
-        75, 30, 42, rl.WHITE,
+        75, 30, 42, rl.RAYWHITE,
     )
     for i in 0..<g_mem.lives {
         draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
     }
     if game_state^ == .Game_Over {
         rl.DrawText(
-            fmt.ctprint("GAME OVER\nPress SPACE to play again"),
-            WINDOW_W / 2, WINDOW_H / 2, 40, rl.WHITE,
+            fmt.ctprint("GAME OVER\n\nHit Space to play again"),
+            WINDOW_W / 4, WINDOW_H / 2, 40, rl.RAYWHITE,
         )
     }
 }
@@ -1692,7 +1692,7 @@ draw_debug_ui :: proc() {
                 ship_state^,
                 g_mem.ship_active_bullets,
             ),
-            3, 3, 12, rl.WHITE,
+            3, 3, 12, rl.RAYWHITE,
         )
         rl.DrawText(
             fmt.ctprintf(
@@ -1706,7 +1706,7 @@ draw_debug_ui :: proc() {
                 play_edge_left(),
                 play_edge_right(),
             ),
-            i32(rl.GetScreenWidth() - 210), 3, 12, rl.WHITE,
+            i32(rl.GetScreenWidth() - 210), 3, 12, rl.RAYWHITE,
         )
     }
 }
@@ -1957,7 +1957,7 @@ reset_gameplay_data :: proc() {
     g_mem.player_id = 0
     g_mem.run = true
     g_mem.ship_state = .Normal
-    g_mem.game_state = .Between_Levels
+    g_mem.game_state = .Intro
     g_mem.score = 0
     g_mem.lives = 3
     g_mem.extra_life_count = 0
@@ -1975,6 +1975,7 @@ reset_gameplay_data :: proc() {
     restart_timer(&g_mem.ufo_timer)
     restart_timer(&g_mem.thrust_draw_timer)
     restart_timer(&g_mem.teleport_timer)
+    restart_timer(&g_mem.intro_timer)
 
     // because the interval evolves over time
     g_mem.beat_sound_timer = Timer {
