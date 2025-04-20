@@ -34,7 +34,7 @@ TIMER_INTERVAL_THRUST_DRAW :: 0.075
 TIMER_INTERVAL_TELEPORT :: 1
 TIMER_INTERVAL_DEATH :: 1
 TIMER_INTERVAL_SPAWN :: 2
-TIMER_INTERVAL_BETWEEN_LEVELS :: 1
+TIMER_INTERVAL_BETWEEN_LEVELS :: 2
 
 SHIP_BULLET_COUNT_LIMIT :: 4
 BULLET_SPEED :: 500
@@ -57,7 +57,7 @@ TIMER_INTERVAL_UFO_SMALL_SHOOT :: 0.75
 SMALL_UFO_CHANCE_TO_SHOOT :: .5
 
 TIMER_INTERVAL_BEAT :: 12
-TIMER_INTERVAL_UFO :: 3
+TIMER_INTERVAL_UFO :: 5
 INIT_TIMER_INTERVAL_BEAT_SOUND :: 1
 
 Game_Memory :: struct {
@@ -82,6 +82,7 @@ Game_Memory :: struct {
     is_thrust_drawing: bool,
     ship_active_bullets: i32,
     teleport_timer: Timer,
+    level: i32,
 }
 
 Game_State :: enum {
@@ -300,34 +301,47 @@ update :: proc() {
     }
 
     // Spawn Ufos
-    tick_timer(&g_mem.ufo_timer, dt)
-    if is_timer_done(g_mem.ufo_timer) {
-        spawner_ufo(g_mem.beat_level)
-        restart_timer(&g_mem.ufo_timer)
-    }
+    spawner_ufo(g_mem.beat_level, dt)
 }
 
-spawner_ufo :: proc(beat_level: i32) {
-    // multiply beat_level by some factor and then chance to spawn ufo
-    // only spawn every interval
+spawner_ufo :: proc(beat_level: i32, dt: f32) {
+    tick_timer(&g_mem.ufo_timer, dt)
+    if !is_timer_done(g_mem.ufo_timer) {
+        return
+    }
+    restart_timer(&g_mem.ufo_timer)
+
+    base_chance_big :: 0.1
+    big_spawn_factor := base_chance_big * (1 + f32(beat_level) * 0.07)
+
+    // 1/5 chance to spawn small at beat_level == 1
+    base_chance_small :: 0.025
+    small_spawn_factor := base_chance_small * (1 + f32(beat_level) * 0.07)
+
+    spawn_ufo_type: Entity_Type
     rgn_spawn := rand.float32()
-    // base_probability :: 0.15
-    base_probability :: 1
-    probability := f32(beat_level) * base_probability
-    if rgn_spawn < probability {
-        rgn_pos := rand.float32_range(0, 2)
-        span_y := f32(play_span_y())
-        if rgn_pos < 1 {
-            // spawn left wall
-            pos_y := (rgn_pos * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
-            pos_x := f32(play_edge_left())
-            spawn_ufo(.Ufo_Small, {pos_x, pos_y}, true, entity_m)
-        } else {
-            // spawn right wall
-            pos_y := ((rgn_pos - 1) * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
-            pos_x := f32(play_edge_right())
-            spawn_ufo(.Ufo_Small, {pos_x, pos_y}, false, entity_m)
-        }
+    if rgn_spawn < big_spawn_factor {
+        spawn_ufo_type = .Ufo_Big
+    } else if rgn_spawn < big_spawn_factor + small_spawn_factor {
+        spawn_ufo_type = .Ufo_Small
+    }
+
+    if spawn_ufo_type == .None {
+        return
+    }
+
+    rgn_pos := rand.float32_range(0, 2)
+    span_y := f32(play_span_y())
+    if rgn_pos < 1 {
+        // spawn left wall
+        pos_y := (rgn_pos * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
+        pos_x := f32(play_edge_left())
+        spawn_ufo(spawn_ufo_type, {pos_x, pos_y}, true, entity_m)
+    } else {
+        // spawn right wall
+        pos_y := ((rgn_pos - 1) * span_y * 0.8) + (span_y * 0.1) - (span_y / 2)
+        pos_x := f32(play_edge_right())
+        spawn_ufo(spawn_ufo_type, {pos_x, pos_y}, false, entity_m)
     }
 }
 
@@ -392,9 +406,8 @@ get_asteroid_count :: proc(entity_m: Entity_Manager) -> i32 {
 }
 
 spawn_level :: proc(entity_m: ^Entity_Manager) {
-    @(static) level : i32 = 1
-    @(static) spawn_offset : f32 = 10
-    for _ in 0..<level+3 {
+    SPAWN_OFFSET :: 10
+    for _ in 0..<g_mem.level+3 {
         unit_direction := make_random_direction()
         speed := rand.float32_range(50,120)
         vel := speed * unit_direction
@@ -407,14 +420,14 @@ spawn_level :: proc(entity_m: ^Entity_Manager) {
             span_proportion := rgn
             dx := span_proportion * f32(play_span_x())
             x := f32(play_edge_left()) + dx
-            y := f32(play_edge_top()) + spawn_offset
+            y := f32(play_edge_top()) + SPAWN_OFFSET
             pos = {x,y}
 
         // right boundary
         } else if rgn < 2 {
             span_proportion := rgn - 1
             dy := span_proportion * f32(play_span_y())
-            x := f32(play_edge_right()) - spawn_offset
+            x := f32(play_edge_right()) - SPAWN_OFFSET
             y := f32(play_edge_top()) + dy
             pos = {x,y}
 
@@ -423,20 +436,20 @@ spawn_level :: proc(entity_m: ^Entity_Manager) {
             span_proportion := rgn - 2
             dx := span_proportion * f32(play_span_x())
             x := f32(play_edge_left()) + dx
-            y := f32(play_edge_bottom()) - spawn_offset
+            y := f32(play_edge_bottom()) - SPAWN_OFFSET
             pos = {x,y}
 
         // left boundary
         } else if rgn < 4 {
             span_proportion := rgn - 3
             dy := span_proportion * f32(play_span_y())
-            x := f32(play_edge_left()) + spawn_offset
+            x := f32(play_edge_left()) + SPAWN_OFFSET
             y := f32(play_edge_top()) + dy
             pos = {x,y}
         }
         spawn_asteroid(.Asteroid_Large, pos, vel, entity_m)
     }
-    level += 1
+    g_mem.level += 1
 }
 
 draw :: proc() {
@@ -520,6 +533,7 @@ game_init :: proc() {
     g_mem.ship_state = .Normal
     g_mem.game_state = .Between_Levels
     g_mem.lives = 3
+    g_mem.level = 1
     g_mem.death_timer = Timer {
         accum = TIMER_INTERVAL_DEATH,
         interval = TIMER_INTERVAL_DEATH,
@@ -1388,77 +1402,6 @@ handle_collisions :: proc(manager: ^Entity_Manager) {
     for data in asteroids_to_spawn {
         spawn_asteroid(data.type, data.pos, data.vel, manager)
     }
-
-    // Collisions with bullets
-    // if entity_type == .Bullet {
-    //     for index_b in 0..<get_active_entity_count(manager^) {
-    //         entity_type_b := get_entity_type(manager, index_b)
-    //         // TODO: against ship
-    //
-    //         if entity_type_b == .Ufo_Big || entity_type_b == .Ufo_Small {
-    //             if shooter == .Ufo {
-    //                 continue
-    //             }
-    //             ufo_index := index_b
-    //             ufo_radius := get_radius_physics(manager, ufo_index)
-    //             ufo_position := get_position(manager, ufo_index)
-    //             bullet_radius := get_radius_physics(manager, index)
-    //
-    //             if rl.CheckCollisionCircles(pos, bullet_radius, ufo_position, ufo_radius) {
-    //                 rl.PlaySound(sounds[.Asteroid_Explode])
-    //
-    //                 // Don't re-destroy bullets already slated for destruction
-    //                 is_slated_destruction := false
-    //                 for destroy_index in entities_to_destroy {
-    //                     if index == destroy_index {
-    //                         is_slated_destruction = true
-    //                         break
-    //                     }
-    //                 }
-    //                 if !is_slated_destruction {
-    //                     rl.PlaySound(sounds[.Bullet_Impact])
-    //                     append(&entities_to_destroy, index)
-    //                 }
-    //
-    //                 if shooter == .Ship {
-    //                     if entity_type_b == .Ufo_Big {
-    //                         increment_score(200)
-    //                     } else if entity_type_b == .Ufo_Small {
-    //                         increment_score(500)
-    //                     }
-    //                 }
-    //                 append(&entities_to_destroy, ufo_index)
-    //             }
-    //         } else if entity_type_b == .Asteroid_Small || 
-    //             entity_type_b == .Asteroid_Medium || 
-    //             entity_type_b == .Asteroid_Large {
-    //
-    //             aster_index := index_b
-    //             aster_radius := get_radius_physics(manager, aster_index)
-    //             aster_position := get_position(manager, aster_index)
-    //             bullet_radius := get_radius_physics(manager, index)
-    //
-    //             if rl.CheckCollisionCircles(pos, bullet_radius, aster_position, aster_radius) {
-    //                 // Don't re-destroy bullets already slated for destruction
-    //                 is_slated_destruction := false
-    //                 for destroy_index in entities_to_destroy {
-    //                     if index == destroy_index {
-    //                         is_slated_destruction = true
-    //                         break
-    //                     }
-    //                 }
-    //                 if !is_slated_destruction {
-    //                     rl.PlaySound(sounds[.Bullet_Impact])
-    //                     append(&entities_to_destroy, index)
-    //                 }
-    //
-    //                 kill_asteroid(manager, &asteroids_to_spawn, &entities_to_destroy, entity_type_b, aster_index, shooter, aster_position)
-    //             }
-    //         }
-    //     }
-    // }
-
-
 }
 
 kill_ship :: proc() {
@@ -1916,6 +1859,7 @@ get_extra_life_count:: proc() -> i32 {
 
 increment_extra_life_count :: proc() {
     g_mem.extra_life_count += 1
+    g_mem.lives += 1
 }
 
 jiggle_asteroid_velocity :: proc(vel: Vec2, multiplier: f32 = 1) -> Vec2 {
@@ -2016,6 +1960,7 @@ reset_gameplay_data :: proc() {
     g_mem.is_beat_sound_hi = false
     g_mem.is_thrust_drawing = false
     g_mem.ship_active_bullets = 0
+    g_mem.level = 1
 
     restart_timer(&g_mem.death_timer)
     restart_timer(&g_mem.spawn_timer)
