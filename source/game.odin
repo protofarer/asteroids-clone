@@ -19,7 +19,7 @@ LOGICAL_H :: 750
 PHYSICS_HZ :: 120
 FIXED_DT :: 1 / PHYSICS_HZ
 
-TIMER_INTERVAL_INTRO_MESSAGE :: 2
+TIMER_INTERVAL_INTRO_MESSAGE :: 5
 
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
@@ -516,7 +516,7 @@ game_update :: proc() {
 game_init_window :: proc() {
     // .Borderlesswindowedmode, .fullscreen_mode, window_maximized
 	rl.SetConfigFlags({.VSYNC_HINT,  .WINDOW_RESIZABLE, .WINDOW_MAXIMIZED})
-	rl.InitWindow(WINDOW_W, WINDOW_H, "Kaivalya")
+	rl.InitWindow(WINDOW_W, WINDOW_H, "Asteroids")
 	rl.SetWindowPosition(50, 150)
 	rl.SetTargetFPS(60)
 	rl.SetExitKey(nil)
@@ -1646,7 +1646,7 @@ draw_ui :: proc() {
     if g_mem.game_state == .Intro {
         rl.DrawText(
             fmt.ctprint("Thruster = W/Up\n\nRotate = A,D/Left,Right arrows\n\nFire = Space\n\nTeleport = Shift"),
-            WINDOW_W / 3, WINDOW_H * 3 / 5, 30, rl.RAYWHITE,
+            WINDOW_W * 3 / 8, WINDOW_H * 3 / 5, 30, rl.RAYWHITE,
         )
     }
     rl.DrawText(
@@ -1662,7 +1662,7 @@ draw_ui :: proc() {
     if game_state^ == .Game_Over {
         rl.DrawText(
             fmt.ctprint("GAME OVER\n\nHit Space to play again"),
-            WINDOW_W / 4, WINDOW_H / 2, 40, rl.RAYWHITE,
+            WINDOW_W * 3 / 8, WINDOW_H / 2, 40, rl.RAYWHITE,
         )
     }
 }
