@@ -10,9 +10,9 @@ import rand "core:math/rand"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-DEBUG :: true
-WINDOW_W :: 1800
-WINDOW_H :: 1000
+DEBUG :: false
+WINDOW_W :: 1000
+WINDOW_H :: 750
 LOGICAL_W :: 1000
 LOGICAL_H :: 750
 
@@ -492,7 +492,7 @@ play_span_y :: proc() -> i32 {
 }
 
 draw_screen_edges :: proc() {
-    rl.DrawRectangleLines(i32(screen_left()), i32(screen_top() + 1), LOGICAL_W, LOGICAL_H, rl.BLUE)
+    rl.DrawRectangleLines(i32(screen_left()), i32(screen_top() + 1), LOGICAL_W, LOGICAL_H - 2, rl.RAYWHITE)
 }
 
 @(export)
@@ -1632,20 +1632,6 @@ get_score :: proc() -> i32 {
     return g_mem.score
 }
 
-draw_score:: proc() {
-    rl.DrawText(
-        fmt.ctprintf(
-            "%v",
-            get_score(),
-        ),
-        300, 30, 42, rl.WHITE,
-    )
-}
-draw_lives :: proc() {
-    for i in 0..<g_mem.lives {
-        draw_ship({315 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
-    }
-}
 draw_game_over :: proc () {
     rl.DrawText(
         fmt.ctprint("GAME OVER\nPress SPACE to play again"),
@@ -1654,8 +1640,16 @@ draw_game_over :: proc () {
 }
 
 draw_ui :: proc() {
-    draw_score()
-    draw_lives()
+    rl.DrawText(
+        fmt.ctprintf(
+            "%v",
+            get_score(),
+        ),
+        75, 30, 42, rl.WHITE,
+    )
+    for i in 0..<g_mem.lives {
+        draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
+    }
     if game_state^ == .Game_Over {
         draw_game_over()
     }
