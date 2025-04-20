@@ -10,7 +10,7 @@ import rand "core:math/rand"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-DEBUG :: false
+DEBUG :: true
 WINDOW_W :: 1000
 WINDOW_H :: 750
 LOGICAL_W :: 1000
@@ -45,13 +45,18 @@ BULLET_PHYSICS_RADIUS :: 1
 
 BIG_UFO_RADIUS :: 25
 BIG_UFO_SPEED :: 150
+// BASE_CHANCE_SPAWN_BIG :: 0.1
+BASE_CHANCE_SPAWN_BIG :: 0.5
 TIMER_INTERVAL_UFO_BIG_MOVE :: 0.5
 BIG_UFO_CHANCE_TO_MOVE :: 1
 TIMER_INTERVAL_UFO_BIG_SHOOT :: 1
 BIG_UFO_CHANCE_TO_SHOOT :: 0.4
 
+
 SMALL_UFO_RADIUS :: 15
 SMALL_UFO_SPEED :: 165
+// BASE_CHANCE_SPAWN_SMALL :: 0.025
+BASE_CHANCE_SPAWN_SMALL :: 0.5
 TIMER_INTERVAL_UFO_SMALL_MOVE :: 0.2
 SMALL_UFO_CHANCE_TO_MOVE :: 1
 TIMER_INTERVAL_UFO_SMALL_SHOOT :: 0.75
@@ -160,45 +165,24 @@ Physics_Data :: struct {
 	positions: [MAX_ENTITIES]Vec2,
 	velocities: [MAX_ENTITIES]Vec2,
 	rotations: [MAX_ENTITIES]f32,
-	masses: [MAX_ENTITIES]f32,
 	radii_physics: [MAX_ENTITIES]f32,
 }
 
 Gameplay_Data :: struct {
-    damages: [MAX_ENTITIES]i32,
-    healths: [MAX_ENTITIES]i32,
 	lifespans: [MAX_ENTITIES]f32,
     shot_timers: [MAX_ENTITIES]Timer,
     move_timers: [MAX_ENTITIES]Timer,
     shooters: [MAX_ENTITIES]Shooter_Type,
 }
 
+Rendering_Data :: struct {
+	visual_rotation_rates: [MAX_ENTITIES]f32, // asteroid visual rotation
+}
+
 Shooter_Type :: enum {
     None,
     Ship,
     Ufo,
-}
-
-MAX_RENDER_VERTICES :: 8
-Render_Vertices_Component :: [MAX_RENDER_VERTICES]Vec2
-Rendering_Data :: struct {
-	types_render: [MAX_ENTITIES]Render_Type,
-	vertices: [MAX_ENTITIES]Render_Vertices_Component,
-	radii_render: [MAX_ENTITIES]f32,
-	colors: [MAX_ENTITIES]rl.Color,
-	visual_rotation_rates: [MAX_ENTITIES]f32, // asteroid visual rotation
-	is_visibles: [MAX_ENTITIES]bool,
-	scales: [MAX_ENTITIES]f32,
-}
-
-Render_Type :: enum {
-    None,
-	Ship,
-	Asteroid,
-	Bullet,
-	Particle,
-    Ufo_Big,
-    Ufo_Small,
 }
 
 game_camera :: proc() -> rl.Camera2D {
@@ -330,11 +314,11 @@ spawner_ufo :: proc(beat_level: i32, dt: f32) {
     }
     restart_timer(&g_mem.ufo_timer)
 
-    base_chance_big :: 0.1
+    base_chance_big : f32 = BASE_CHANCE_SPAWN_BIG
     big_spawn_factor := base_chance_big * (1 + f32(beat_level) * 0.07)
 
     // 1/5 chance to spawn small at beat_level == 1
-    base_chance_small :: 0.025
+    base_chance_small : f32 = BASE_CHANCE_SPAWN_SMALL
     small_spawn_factor := base_chance_small * (1 + f32(beat_level) * 0.07)
 
     spawn_ufo_type: Entity_Type
@@ -370,7 +354,6 @@ spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, en
     move_timer: Timer
     shot_timer: Timer
     speed: f32
-    render_type: Render_Type
     #partial switch entity_type {
     case .Ufo_Big:
         radius = BIG_UFO_RADIUS
@@ -383,7 +366,6 @@ spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, en
             accum = TIMER_INTERVAL_UFO_BIG_SHOOT,
         }
         speed = BIG_UFO_SPEED
-        render_type = .Ufo_Big
     case .Ufo_Small:
         radius = SMALL_UFO_RADIUS
         move_timer = Timer{
@@ -395,17 +377,11 @@ spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool, en
             accum = TIMER_INTERVAL_UFO_SMALL_SHOOT,
         }
         speed = SMALL_UFO_SPEED
-        render_type = .Ufo_Small
     }
     data_in := Component_Data{
         position = pos,
         velocity = is_moving_right ? Vec2{speed,0} : Vec2{-speed,0},
         radius_physics = radius * 0.8,
-        render_type = render_type,
-        color = rl.RAYWHITE,
-        radius_render = radius,
-        health = 1,
-        is_visible = true,
         move_timer = move_timer,
         shot_timer = shot_timer,
     }
@@ -659,41 +635,31 @@ game_parent_window_size_changed :: proc(w, h: int) {
 draw_entities :: proc(manager: ^Entity_Manager) {
     dt := rl.GetFrameTime()
     for index in 0..<get_active_entity_count(manager^) {
-        if !manager.is_visibles[index] do continue
-
         pos := get_position(manager, index)
         rot := get_rotation(manager, index)
-        color := get_color(manager, index)
 
-        switch get_render_type(manager, index) {
+        entity_type := get_entity_type(manager, index)
+        switch entity_type {
         case .Ship:
-            vertices := get_vertices(manager,index)
-            scale := get_scale(manager, index)
             switch ship_state^ {
             case .Normal:
-                draw_ship(pos, rot, scale)
+                draw_ship(pos, rot)
                 if g_mem.is_thrust_drawing {
-                    draw_ship_thruster(pos, rot, scale)
+                    draw_ship_thruster(pos, rot)
                 }
             case .Death:
                 draw_ship_death(pos)
             case .Spawning:
-                draw_ship_spawning(pos, rot, vertices, color, dt, scale)
+                draw_ship_spawning(pos, rot, dt)
             case .Teleporting:
             }
-        case .Asteroid:
+        case .Asteroid_Small, .Asteroid_Medium, .Asteroid_Large:
             radius := get_radius_physics(manager, index)
-            draw_asteroid(pos, rot, radius, get_color(manager, index))
+            draw_asteroid(pos, rot, radius)
         case .Bullet:
-            draw_bullet(pos, color)
-        case .Particle:
-            rl.DrawCircleV(pos, 1.0, color)
-        case .Ufo_Big:
-            draw_ufo(pos, color, .Ufo_Big)
-            physics_radius := get_radius_physics(manager, index)
-            if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
-        case .Ufo_Small:
-            draw_ufo(pos, color, .Ufo_Small)
+            draw_bullet(pos)
+        case .Ufo_Big, .Ufo_Small:
+            draw_ufo(pos, entity_type)
             physics_radius := get_radius_physics(manager, index)
             if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
         case .None:
@@ -701,8 +667,8 @@ draw_entities :: proc(manager: ^Entity_Manager) {
     }
 }
 
-draw_ufo :: proc(pos: Vec2, color: rl.Color, render_type: Render_Type) {
-    is_ufo_big := render_type == .Ufo_Big
+draw_ufo :: proc(pos: Vec2, entity_type: Entity_Type) {
+    is_ufo_big := entity_type == .Ufo_Big
     r :f32= is_ufo_big ? BIG_UFO_RADIUS : SMALL_UFO_RADIUS
     b :f32= r // body half length
     s1 :f32= r * 0.4 // top and bottom body half lengths
@@ -738,11 +704,11 @@ draw_ufo :: proc(pos: Vec2, color: rl.Color, render_type: Render_Type) {
     rl.DrawLineV(canopy_line[0] + d_pos, canopy_line[1] + d_pos, rl.RAYWHITE)
 }
 
-draw_bullet :: proc(pos: Vec2, color: rl.Color) {
-    rl.DrawRectangle(i32(pos.x), i32(pos.y), 3, 3, color)
+draw_bullet :: proc(pos: Vec2) {
+    rl.DrawRectangle(i32(pos.x), i32(pos.y), 3, 3, rl.RAYWHITE)
 }
 
-draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Component, color: rl.Color, dt: f32, scale: f32) {
+draw_ship_spawning :: proc(pos: Vec2, rot: f32, dt: f32) {
     @(static) blink_accum : f32 = 0.2
     @(static) is_visible := true
     blink_interval :f32= 0.2
@@ -752,7 +718,7 @@ draw_ship_spawning :: proc(pos: Vec2, rot: f32, vertices: Render_Vertices_Compon
         blink_accum = blink_interval
     }
     if is_visible {
-        draw_ship(pos, rot, scale)
+        draw_ship(pos, rot)
     }
 }
 
@@ -792,7 +758,7 @@ draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
     nose_angle := math.to_radians(f32(32))
 
     // Body
-    vertices: Render_Vertices_Component
+    vertices: [12]Vec2
 
      // nose
     vertices[0] = Vec2{r, 0}
@@ -814,6 +780,8 @@ draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
     rl.DrawLineV(vertices[3], vertices[4], rl.RAYWHITE)
 
     if DEBUG do rl.DrawPixelV(pos, rl.RAYWHITE)
+    radius := get_radius_physics(g_mem.manager, get_player_index())
+    if DEBUG do rl.DrawCircleLinesV(pos, radius, rl.BLUE)
 }
 
 draw_ship_thruster :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
@@ -822,7 +790,7 @@ draw_ship_thruster :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
     t := b + (r * 0.5) // thrust exhaust length
     nose_angle := math.to_radians(f32(32))
     b_half_y := (b + r) * math.tan(nose_angle/2) + 1 // add 1, pixel connecting butt to side may or may not render depending on s(?) or r
-    thrust_vertices: Render_Vertices_Component
+    thrust_vertices: [12]Vec2
     thrust_vertices[0] =  Vec2{-t, 0}
     thrust_vertices[1] = Vec2{-b, -(b_half_y * 0.6)}
     thrust_vertices[2] =  Vec2{-b, (b_half_y * 0.6)}
@@ -882,16 +850,8 @@ Component_Data :: struct {
     rotation: Maybe(f32),
     mass: Maybe(f32),
     radius_physics: Maybe(f32),
-    damage: Maybe(i32),
-    health: Maybe(i32),
     lifespan: Maybe(f32),
-    render_type: Maybe(Render_Type),
-    radius_render: Maybe(f32),
-    color: Maybe(rl.Color),
-    scale: Maybe(f32),
-    vertices: Maybe(Render_Vertices_Component),
     visual_rotation_rate: Maybe(f32),
-    is_visible: Maybe(bool),
     move_timer: Maybe(Timer),
     shot_timer: Maybe(Timer),
     shooter: Maybe(Shooter_Type),
@@ -904,16 +864,8 @@ Component_Request_Data :: struct {
     rotation: bool,
     mass: bool,
     radius_physics: bool,
-    damage: bool,
-    health: bool,
     lifespan: bool,
-    render_type: bool,
-    vertices: bool,
-    radius_render: bool,
-    color: bool,
     visual_rotation_rate: bool,
-    is_visible: bool,
-    scale: bool,
     move_timer: bool,
     shot_timer: bool,
     shooter: bool,
@@ -937,38 +889,14 @@ get_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, request: Com
     if request.rotation {
         data.rotation = get_rotation(manager, index)
     }
-    if request.mass {
-        data.mass = get_mass(manager, index)
-    }
     if request.radius_physics {
         data.radius_physics = get_radius_physics(manager, index)
-    }
-    if request.damage {
-        data.damage = get_damage(manager, index)
-    }
-    if request.health {
-        data.health = get_health(manager, index)
     }
     if request.lifespan {
         data.lifespan = get_lifespan(manager, index)
     }
-    if request.render_type {
-        data.render_type = get_render_type(manager, index)
-    }
-    if request.radius_render {
-        data.radius_render = get_radius_render(manager, index)
-    }
-    if request.color {
-        data.color = get_color(manager, index)
-    }
-    if request.scale {
-        data.scale = get_scale(manager, index)
-    }
     if request.visual_rotation_rate {
         data.visual_rotation_rate = get_visual_rotation_rate(manager, index)
-    }
-    if request.is_visible {
-        data.is_visible = get_is_visible(manager, index)
     }
     if request.move_timer {
         data.move_timer = get_move_timer(manager, index)
@@ -1001,42 +929,11 @@ set_component_data :: proc(manager: ^Entity_Manager, id: Entity_Id, data: Compon
     if val, ok := data.rotation.?; ok {
         set_rotation(manager, idx, val)
     }
-    if val, ok := data.mass.?; ok {
-        set_mass(manager, idx, val)
-    }
     if val, ok := data.lifespan.?; ok {
         set_lifespan(manager, idx, val)
     }
-    if val, ok := data.damage.?; ok {
-        set_damage(manager, idx, val)
-    }
-    if val, ok := data.health.?; ok {
-        set_health(manager, idx, val)
-    }
-    if val, ok := data.render_type.?; ok {
-        set_render_type(manager, idx, val)
-    }
-    if val, ok := data.vertices.?; ok {
-        set_vertices(manager, idx, val)
-    }
-    if val, ok := data.radius_render.?; ok {
-        set_radius_render(manager, idx, val)
-    }
-    if val, ok := data.color.?; ok {
-        set_color(manager, idx, val)
-    }
     if val, ok := data.visual_rotation_rate.?; ok {
         set_visual_rotation_rate(manager, idx, val)
-    }
-    if val, ok := data.is_visible.?; ok {
-        set_is_visible(manager, idx, val)
-    } else {
-        set_is_visible(manager, idx, true)
-    }
-    if val, ok := data.scale.?; ok {
-        set_scale(manager, idx, val)
-    } else {
-        set_scale(manager, idx, 1)
     }
     if val, ok := data.move_timer.?; ok {
         set_move_timer(manager, idx, val)
@@ -1065,18 +962,9 @@ _pop_back_entity :: proc(manager: ^Entity_Manager) -> (Entity_Type, Component_Da
         position = manager.positions[last_index],
         velocity = manager.velocities[last_index],
         rotation = manager.rotations[last_index],
-        mass = manager.masses[last_index],
         radius_physics = manager.radii_physics[last_index],
-        damage = manager.damages[last_index],
-        health = manager.healths[last_index],
         lifespan = manager.lifespans[last_index],
-        radius_render = manager.radii_render[last_index],
-        color = manager.colors[last_index],
-        scale = manager.scales[last_index],
-        vertices = manager.vertices[last_index],
         visual_rotation_rate = manager.visual_rotation_rates[last_index],
-        is_visible = manager.is_visibles[last_index],
-        render_type = manager.rendering.types_render[last_index],
         move_timer = manager.move_timers[last_index],
         shot_timer = manager.shot_timers[last_index],
         shooter = manager.shooters[last_index],
@@ -1173,7 +1061,8 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         }
 
         is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || is_gesture_hold
-        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W) || !is_gesture_hold
+        // WARN: removed `|| !is_gesture_hold` below, todo later
+        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)
         if is_thrusting {
             tick_timer(&g_mem.thrust_draw_timer, dt)
             if is_timer_done(g_mem.thrust_draw_timer) {
@@ -1551,14 +1440,6 @@ set_rotation :: proc(manager: ^Entity_Manager, idx: int, rot: f32) {
     manager.rotations[idx] = rot
 }
 
-get_mass :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
-    return manager.masses[idx]
-}
-
-set_mass :: proc(manager: ^Entity_Manager, idx: int, mass: f32) {
-    manager.masses[idx] = mass
-}
-
 get_radius_physics :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
     return manager.radii_physics[idx]
 }
@@ -1575,76 +1456,12 @@ set_lifespan :: proc(manager: ^Entity_Manager, idx: int, radius: f32) {
     manager.lifespans[idx] = radius
 }
 
-get_health :: proc(manager: ^Entity_Manager, idx: int) -> i32 {
-    return manager.gameplay.healths[idx]
-}
-
-set_health :: proc(manager: ^Entity_Manager, idx: int, health: i32) {
-    manager.gameplay.healths[idx] =  health
-}
-
-get_damage :: proc(manager: ^Entity_Manager, idx: int) -> i32 {
-    return manager.gameplay.damages[idx]
-}
-
-set_damage :: proc(manager: ^Entity_Manager, idx: int, damage: i32) {
-    manager.gameplay.damages[idx] = damage
-}
-
-get_render_type :: proc(manager: ^Entity_Manager, idx: int) -> Render_Type {
-    return manager.types_render[idx]
-}
-
-set_render_type :: proc(manager: ^Entity_Manager, idx: int, render_type: Render_Type) {
-    manager.types_render[idx] = render_type
-}
-
-get_vertices :: proc(manager: ^Entity_Manager, idx: int) -> Render_Vertices_Component {
-    return manager.rendering.vertices[idx]
-}
-
-set_vertices :: proc(manager: ^Entity_Manager, idx: int, vertices: Render_Vertices_Component) {
-    manager.rendering.vertices[idx] = vertices
-}
-
-get_radius_render :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
-    return manager.radii_render[idx]
-}
-
-set_radius_render :: proc(manager: ^Entity_Manager, idx: int, radius: f32) {
-    manager.radii_render[idx] = radius
-}
-
-get_color :: proc(manager: ^Entity_Manager, idx: int) -> rl.Color {
-    return manager.colors[idx]
-}
-
-set_color :: proc(manager: ^Entity_Manager, idx: int, color: rl.Color) {
-    manager.colors[idx] = color
-}
-
 get_visual_rotation_rate :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
     return manager.visual_rotation_rates[idx]
 }
 
 set_visual_rotation_rate :: proc(manager: ^Entity_Manager, idx: int, visual_rotation_rate: f32) {
     manager.visual_rotation_rates[idx] = visual_rotation_rate
-}
-
-get_is_visible :: proc(manager: ^Entity_Manager, idx: int) -> bool {
-    return manager.is_visibles[idx]
-}
-
-set_is_visible :: proc(manager: ^Entity_Manager, idx: int, is_visibile: bool) {
-    manager.is_visibles[idx] = is_visibile
-}
-
-get_scale :: proc(manager: ^Entity_Manager, idx: int) -> f32 {
-    return manager.scales[idx]
-}
-
-set_scale :: proc(manager: ^Entity_Manager, idx: int, scale: f32) {
-    manager.scales[idx] = scale
 }
 
 get_move_timer :: proc(manager: ^Entity_Manager, idx: int) -> Timer {
@@ -1671,8 +1488,8 @@ set_shooter :: proc(manager: ^Entity_Manager, idx: int, shooter: Shooter_Type) {
     manager.shooters[idx] = shooter
 }
 
-draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32, color: rl.Color) {
-    rl.DrawPolyLines(pos, N_ASTEROID_SIDES, radius, rot,  color)
+draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32) {
+    rl.DrawPolyLines(pos, N_ASTEROID_SIDES, radius, rot, rl.RAYWHITE)
 }
 
 get_score :: proc() -> i32 {
@@ -1694,7 +1511,7 @@ draw_ui :: proc() {
         75, 30, 42, rl.RAYWHITE,
     )
     for i in 0..<g_mem.lives {
-        draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.9)
+        draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.75)
     }
     if game_state^ == .Game_Over {
         rl.DrawText(
@@ -1710,7 +1527,7 @@ draw_debug_ui :: proc() {
     if DEBUG {
         rl.DrawText(
             fmt.ctprintf(
-                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt: %v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nhp: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v\nship_active_bulet: %v",
+                "fps: %v\nwin: %vx%v\nlogical: %vx%v\ndt: %v\ndt_running: %v\npos: %v\nvel: %v\nspeed: %v\nactive_entities: %v\nentities: %v\nfree_list: %v\ngame_state: %v\nship_state: %v\nship_active_bulet: %v",
                 rl.GetFPS(),
                 rl.GetScreenWidth(),
                 rl.GetScreenHeight(),
@@ -1721,7 +1538,6 @@ draw_debug_ui :: proc() {
                 get_position(g_mem.manager, 0),
                 vel,
                 speed,
-                get_health(g_mem.manager, 0),
                 get_active_entity_count(g_mem.manager^),
                 sa.slice(&g_mem.entities)[:get_active_entity_count(g_mem.manager^)],
                 sa.slice(&g_mem.free_list)[:sa.len(g_mem.free_list)],
@@ -1789,12 +1605,7 @@ spawn_ship :: proc(pos: Vec2, rot: f32, manager: ^Entity_Manager) -> Entity_Id {
         rotation = rot,
         velocity = Vec2{0, 0},
         radius_physics = SHIP_R,
-        render_type = Render_Type.Ship,
-        color = rl.RAYWHITE,
-        radius_render = SHIP_R,
-        damage = 1,
-        health = 3,
-        is_visible = true,
+
     })
     return id
 }
@@ -1803,28 +1614,22 @@ spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2, manager: 
     id := create_entity(manager, entity_type)
     visual_rotation_rate := rand.float32_range(-2, 2)
     radius: f32
-    health: i32
     #partial switch entity_type {
     case .Asteroid_Small:
         radius = SMALL_ASTEROID_RADIUS
-        health = 1
     case .Asteroid_Medium:
         radius = SMALL_ASTEROID_RADIUS * 2
-        health = 1
+        
     case .Asteroid_Large:
         radius = SMALL_ASTEROID_RADIUS * 4
-        health = 1
+        
     }
     data_in := Component_Data{
         position = pos,
         velocity = vel,
         radius_physics = radius,
-        render_type = Render_Type.Asteroid,
-        color = rl.RAYWHITE,
-        radius_render = radius,
         visual_rotation_rate = visual_rotation_rate,
-        health = health,
-        is_visible = true,
+        
     }
     set_component_data(manager, id, data_in)
 }
@@ -2116,10 +1921,6 @@ spawn_bullet :: proc(manager: ^Entity_Manager, pos: Vec2, vel: Vec2, shooter: Sh
     data_in := Component_Data{
         position = pos,
         velocity = vel,
-        damage = 1,
-        is_visible = true,
-        color = rl.RAYWHITE,
-        render_type = Render_Type.Bullet,
         lifespan = BULLET_LIFESPAN,
         shooter = shooter,
         radius_physics = BULLET_PHYSICS_RADIUS,
@@ -2132,18 +1933,9 @@ reset_entity_components :: proc(manager: ^Entity_Manager, index: int) {
     manager.positions[index] = Vec2{0, 0}
     manager.velocities[index] = Vec2{0, 0}
     manager.rotations[index] = 0
-    manager.masses[index] = 0
     manager.radii_physics[index] = 0
-    manager.damages[index] = 0
-    manager.healths[index] = 0
     manager.lifespans[index] = 0
-    manager.types_render[index] = Render_Type.None // Or some sensible default
-    manager.radii_render[index] = 0
-    manager.colors[index] = rl.RAYWHITE
-    manager.scales[index] = 1
-    manager.vertices[index] = {}
     manager.visual_rotation_rates[index] = 0
-    manager.is_visibles[index] = false
     manager.move_timers[index] = Timer{}
     manager.shot_timers[index] = Timer{}
     manager.shooters[index] = .None
