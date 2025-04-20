@@ -10,7 +10,7 @@ import rand "core:math/rand"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-DEBUG :: true
+DEBUG :: false
 WINDOW_W :: 1000
 WINDOW_H :: 750
 LOGICAL_W :: 1000
@@ -21,7 +21,7 @@ FIXED_DT :: 1 / PHYSICS_HZ
 
 TIMER_INTERVAL_INTRO_MESSAGE :: 0.5
 
-MAX_ENTITIES :: 128
+MAX_ENTITIES :: 64
 N_ASTEROID_SIDES :: 8
 SMALL_ASTEROID_RADIUS :: 15
 
@@ -45,8 +45,8 @@ BULLET_PHYSICS_RADIUS :: 1
 
 BIG_UFO_RADIUS :: 25
 BIG_UFO_SPEED :: 150
-// BASE_CHANCE_SPAWN_BIG :: 0.1
-BASE_CHANCE_SPAWN_BIG :: 0.5
+BASE_CHANCE_SPAWN_BIG :: 0.1
+// BASE_CHANCE_SPAWN_BIG :: 0.5 // TEST
 TIMER_INTERVAL_UFO_BIG_MOVE :: 0.5
 BIG_UFO_CHANCE_TO_MOVE :: 1
 TIMER_INTERVAL_UFO_BIG_SHOOT :: 1
@@ -55,41 +55,41 @@ BIG_UFO_CHANCE_TO_SHOOT :: 0.4
 
 SMALL_UFO_RADIUS :: 15
 SMALL_UFO_SPEED :: 165
-// BASE_CHANCE_SPAWN_SMALL :: 0.025
-BASE_CHANCE_SPAWN_SMALL :: 0.5
+BASE_CHANCE_SPAWN_SMALL :: 0.025
+// BASE_CHANCE_SPAWN_SMALL :: 0.5 // TEST
 TIMER_INTERVAL_UFO_SMALL_MOVE :: 0.2
 SMALL_UFO_CHANCE_TO_MOVE :: 1
 TIMER_INTERVAL_UFO_SMALL_SHOOT :: 0.75
 SMALL_UFO_CHANCE_TO_SHOOT :: .5
 
-TIMER_INTERVAL_BEAT :: 12
+TIMER_INTERVAL_BEAT :: 15
 TIMER_INTERVAL_UFO :: 5
 INIT_TIMER_INTERVAL_BEAT_SOUND :: 1
 
 Game_Memory :: struct {
 	using manager: ^Entity_Manager,
-	player_id: Entity_Id,
-	run: bool,
     sounds: [Sound_Kind]rl.Sound,
-    score: i32,
-    lives: i32,
-    extra_life_count: i32,
+    game_state: Game_State,
     ship_state: Ship_State,
+	player_id: Entity_Id,
     death_timer: Timer,
     spawn_timer: Timer,
     between_levels_timer: Timer,
-    game_state: Game_State,
-    beat_level: i32,
     beat_level_timer: Timer,
     ufo_timer: Timer,
     beat_sound_timer: Timer,
-    is_beat_sound_hi: bool,
     thrust_draw_timer: Timer,
-    is_thrust_drawing: bool,
-    ship_active_bullets: i32,
     teleport_timer: Timer,
-    level: i32,
     intro_timer: Timer,
+    score: i32,
+    level: i32,
+    lives: i32,
+    extra_life_count: i32,
+    beat_level: i32,
+    ship_active_bullets: i32,
+	run: bool,
+    is_thrust_drawing: bool,
+    is_beat_sound_hi: bool,
 }
 
 touch_pos: Vec2
@@ -119,7 +119,6 @@ Timer :: struct {
 }
 
 g_mem: ^Game_Memory
-sounds: ^[Sound_Kind]rl.Sound
 
 Sound_Kind :: enum {
     Fire,
@@ -173,6 +172,12 @@ Shooter_Type :: enum {
     Ufo,
 }
 
+
+is_gesture_tap: bool
+is_gesture_hold: bool
+is_gesture_hold_right: bool
+is_gesture_hold_left: bool
+
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
@@ -188,25 +193,36 @@ ui_camera :: proc() -> rl.Camera2D {
 	}
 }
 
-set_game_over :: proc() {
-    g_mem.game_state = .Game_Over
-}
-
-eval_game_over :: proc() {
-    if rl.IsKeyPressed(.V) && DEBUG {
-        set_game_over()
-    }
-    if g_mem.game_state == .Game_Over {
-        if rl.IsKeyPressed(.SPACE) {
-            reset_gameplay_data()
-        }
-    }
-}
-
 update :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) {
 		g_mem.run = false
 	}
+
+    is_gesture_hold = false
+    is_gesture_hold_left = false
+    is_gesture_hold_right = false
+    is_gesture_tap = false
+
+    // Gestures
+    last_gesture = current_gesture
+    current_gesture = rl.GetGestureDetected()
+    touch_pos = rl.GetTouchPosition(0)
+    valid_touch := rl.CheckCollisionPointRec(touch_pos, touch_area)
+
+    if valid_touch {
+        switch {
+        case .TAP in current_gesture:
+            is_gesture_tap = true
+        
+        case .HOLD in current_gesture, .DRAG in current_gesture:
+            is_gesture_hold = true
+            if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                is_gesture_hold_left = true
+            } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                is_gesture_hold_right = true
+            }
+        }
+    }
 
     eval_game_over()
     if g_mem.game_state == .Game_Over do return
@@ -214,10 +230,8 @@ update :: proc() {
     dt := rl.GetFrameTime()
 
     if g_mem.game_state == .Intro {
-        tick_timer(&g_mem.intro_timer, dt)
-        if is_timer_done(g_mem.intro_timer) {
+        if process_timer(&g_mem.intro_timer) {
             g_mem.game_state = .Between_Levels
-            restart_timer(&g_mem.intro_timer)
         }
         return
     }
@@ -259,10 +273,8 @@ update :: proc() {
     if count == 0 && g_mem.game_state == .Play {
         g_mem.game_state = .Between_Levels
     } else if g_mem.game_state == .Between_Levels {
-        tick_timer(&g_mem.between_levels_timer, dt)
-        if is_timer_done(g_mem.between_levels_timer) {
+        if process_timer(&g_mem.between_levels_timer) {
             g_mem.game_state = .Play
-            restart_timer(&g_mem.between_levels_timer)
             restart_timer(&g_mem.beat_level_timer)
             restart_timer(&g_mem.beat_sound_timer)
             g_mem.beat_level = 1
@@ -272,32 +284,27 @@ update :: proc() {
     }
 
     // Update beat levels
-    tick_timer(&g_mem.beat_level_timer, dt)
-    if is_timer_done(g_mem.beat_level_timer) {
+    if process_timer(&g_mem.beat_level_timer) {
         g_mem.beat_level = clamp(g_mem.beat_level + 1, 1, 4)
         update_beat_sound_timer_with_level(g_mem.beat_level)
-        restart_timer(&g_mem.beat_level_timer)
     }
 
     // Play beat sound IAW beat level
-    tick_timer(&g_mem.beat_sound_timer, dt)
-    if is_timer_done(g_mem.beat_sound_timer) {
+    if process_timer(&g_mem.beat_sound_timer) {
         if g_mem.is_beat_sound_hi {
-            rl.PlaySound(sounds[.Beat_Hi])
+            rl.PlaySound(g_mem.sounds[.Beat_Hi])
         } else {
-            rl.PlaySound(sounds[.Beat_Lo])
+            rl.PlaySound(g_mem.sounds[.Beat_Lo])
         }
-        restart_timer(&g_mem.beat_sound_timer)
         g_mem.is_beat_sound_hi = !g_mem.is_beat_sound_hi
     }
 
     // Spawn Ufos
-    // spawner_ufo(g_mem.beat_level, dt)
+    spawner_ufo(g_mem.beat_level, dt)
 }
 
 spawner_ufo :: proc(beat_level: i32, dt: f32) {
-    tick_timer(&g_mem.ufo_timer, dt)
-    if !is_timer_done(g_mem.ufo_timer) {
+    if !process_timer(&g_mem.ufo_timer) {
         return
     }
     restart_timer(&g_mem.ufo_timer)
@@ -549,8 +556,6 @@ game_init :: proc() {
         accum = TIMER_INTERVAL_INTRO_MESSAGE,
         interval = TIMER_INTERVAL_INTRO_MESSAGE,
     }
-
-    sounds = &g_mem.sounds
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
     g_mem.player_id = player_id
@@ -974,8 +979,7 @@ update_ship :: proc(index: int) {
     dt := rl.GetFrameTime()
     switch g_mem.ship_state {
     case .Death:
-        tick_timer(&g_mem.death_timer, dt)
-        if is_timer_done(g_mem.death_timer) {
+        if process_timer(&g_mem.death_timer) {
             if g_mem.lives <= 0 {
                 set_game_over()
             } else {
@@ -983,54 +987,21 @@ update_ship :: proc(index: int) {
                 set_position(get_player_index(), Vec2{0,0})
                 set_rotation(index, math.to_radians(f32(-90)))
             }
-            restart_timer(&g_mem.death_timer)
         }
     case .Teleporting:
-        tick_timer(&g_mem.teleport_timer, dt)
-        if is_timer_done(g_mem.teleport_timer) {
+        if process_timer(&g_mem.teleport_timer) {
             rgn_pos_x := rand.float32_range(-0.4, 0.4) * f32(play_span_x())
             rgn_pos_y := rand.float32_range(-0.4, 0.4) * f32(play_span_y())
             new_pos := Vec2{rgn_pos_x, rgn_pos_y}
             set_position(index, new_pos)
             g_mem.ship_state = .Normal
-            restart_timer(&g_mem.teleport_timer)
         }
     case .Spawning, .Normal:
         if g_mem.ship_state == .Spawning {
-            tick_timer(&g_mem.spawn_timer, dt)
-            if is_timer_done(g_mem.spawn_timer) {
+            if process_timer(&g_mem.spawn_timer) {
                 g_mem.ship_state = .Normal
-                restart_timer(&g_mem.spawn_timer)
             }
         }
-
-        // Gestures
-        last_gesture = current_gesture
-        current_gesture = rl.GetGestureDetected()
-        touch_pos = rl.GetTouchPosition(0)
-        valid_touch := rl.CheckCollisionPointRec(touch_pos, touch_area)
-
-        is_gesture_tap: bool
-        is_gesture_hold: bool
-        is_gesture_hold_right: bool
-        is_gesture_hold_left: bool
-
-        if valid_touch {
-            switch {
-            case .TAP in current_gesture:
-                is_gesture_tap = true
-            
-            case .HOLD in current_gesture, .DRAG in current_gesture:
-                is_gesture_hold = true
-                if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                    is_gesture_hold_left = true
-                } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                    is_gesture_hold_right = true
-                }
-            }
-        }
-
-
 
         if rl.IsKeyPressed(.LEFT_SHIFT) || rl.IsKeyPressed(.RIGHT_SHIFT)  {
             g_mem.ship_state = .Teleporting
@@ -1039,11 +1010,9 @@ update_ship :: proc(index: int) {
 
         is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || is_gesture_hold
         // WARN: removed `|| !is_gesture_hold` below, todo later
-        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)
+        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)  || !is_gesture_hold
         if is_thrusting {
-            tick_timer(&g_mem.thrust_draw_timer, dt)
-            if is_timer_done(g_mem.thrust_draw_timer) {
-                restart_timer(&g_mem.thrust_draw_timer)
+            if process_timer(&g_mem.thrust_draw_timer) {
                 g_mem.is_thrust_drawing = !g_mem.is_thrust_drawing
             }
         }
@@ -1051,8 +1020,8 @@ update_ship :: proc(index: int) {
             restart_timer(&g_mem.thrust_draw_timer)
             g_mem.is_thrust_drawing = false
         }
-        if is_thrusting && !rl.IsSoundPlaying(sounds[.Thrust]){
-                rl.PlaySound(sounds[.Thrust])
+        if is_thrusting && !rl.IsSoundPlaying(g_mem.sounds[.Thrust]){
+                rl.PlaySound(g_mem.sounds[.Thrust])
         }
 
         d_rot: f32
@@ -1066,7 +1035,7 @@ update_ship :: proc(index: int) {
         if rl.IsKeyPressed(.SPACE) || is_gesture_tap {
             if g_mem.ship_active_bullets < SHIP_BULLET_COUNT_LIMIT {
                 spawn_bullet_from_ship()
-                rl.PlaySound(sounds[.Fire])
+                rl.PlaySound(g_mem.sounds[.Fire])
                 if g_mem.ship_state == .Spawning {
                     g_mem.ship_state = .Normal
                 }
@@ -1128,8 +1097,8 @@ update_entities :: proc( dt: f32) {
             set_rotation(index, new_rot)
 		case .Bullet:
         case .Ufo_Big, .Ufo_Small:
-            if !rl.IsSoundPlaying(sounds[.Ufo_Alarm]) {
-                rl.PlaySound(sounds[.Ufo_Alarm])
+            if !rl.IsSoundPlaying(g_mem.sounds[.Ufo_Alarm]) {
+                rl.PlaySound(g_mem.sounds[.Ufo_Alarm])
             }
             vel := get_velocity(index)
             move_timer := get_move_timer(index)
@@ -1321,8 +1290,8 @@ handle_collisions :: proc() {
 }
 
 kill_ship :: proc() {
-    if !rl.IsSoundPlaying(sounds[.Death]) {
-        rl.PlaySound(sounds[.Death])
+    if !rl.IsSoundPlaying(g_mem.sounds[.Death]) {
+        rl.PlaySound(g_mem.sounds[.Death])
     }
     g_mem.lives -= 1
     g_mem.ship_state = .Death
@@ -1342,7 +1311,7 @@ identify_pair_entity_types :: proc(spec_a: Entity_Type, spec_b: Entity_Type, rcv
 
 kill_asteroid :: proc (asteroids_to_spawn: ^[dynamic]Spawn_Asteroid_Data, entities_to_destroy: ^[dynamic]int, type: Entity_Type, aster_index: int, shooter: Shooter_Type, aster_position: Vec2) {
     aster_velocity := get_velocity(aster_index)
-    rl.PlaySound(sounds[.Asteroid_Explode])
+    rl.PlaySound(g_mem.sounds[.Asteroid_Explode])
 
     #partial switch type {
     case .Asteroid_Small:
@@ -1376,7 +1345,7 @@ kill_asteroid :: proc (asteroids_to_spawn: ^[dynamic]Spawn_Asteroid_Data, entiti
 }
 
 kill_ufo :: proc (entities_to_destroy: ^[dynamic]int, ufo_type: Entity_Type, ufo_index: int, ufo_position: Vec2, shooter: Shooter_Type) {
-    rl.PlaySound(sounds[.Asteroid_Explode])
+    rl.PlaySound(g_mem.sounds[.Asteroid_Explode])
     if shooter == .Ship {
         if ufo_type == .Ufo_Big {
             increment_score(200)
@@ -1747,8 +1716,7 @@ is_out_of_bounds_x :: proc(pos: Vec2) -> bool {
 
 process_ufo_move :: proc(index: int, dt: f32, move_timer: Timer, vel: Vec2, type: Entity_Type) {
     move_timer := move_timer
-    tick_timer(&move_timer, dt)
-    if is_timer_done(move_timer) {
+    if process_timer(&move_timer) {
         chance_to_move : f32 = type == .Ufo_Big ? BIG_UFO_CHANCE_TO_MOVE : SMALL_UFO_CHANCE_TO_MOVE
         rgn := rand.float32()
         if rgn < chance_to_move {
@@ -1778,15 +1746,13 @@ process_ufo_move :: proc(index: int, dt: f32, move_timer: Timer, vel: Vec2, type
                 set_velocity(index, new_vel)
             }
         }
-        restart_timer(&move_timer)
     }
     set_move_timer(index, move_timer)
 }
 
 process_ufo_shot :: proc(index: int, dt: f32, shot_timer: Timer, type: Entity_Type, ufo_pos: Vec2) {
     shot_timer := shot_timer
-    tick_timer(&shot_timer, dt)
-    if is_timer_done(shot_timer) {
+    if process_timer(&shot_timer) {
         chance_to_shoot : f32 = type == .Ufo_Big ? BIG_UFO_CHANCE_TO_SHOOT : SMALL_UFO_CHANCE_TO_SHOOT
         rgn := rand.float32()
         if rgn < chance_to_shoot {
@@ -1804,9 +1770,8 @@ process_ufo_shot :: proc(index: int, dt: f32, shot_timer: Timer, type: Entity_Ty
             }
 
             spawn_bullet(ufo_pos, shot_dir * BULLET_SPEED, .Ufo)
-            rl.PlaySound(sounds[.Fire])
+            rl.PlaySound(g_mem.sounds[.Fire])
         }
-        restart_timer(&shot_timer)
     }
     set_shot_timer(index, shot_timer)
 }
@@ -1835,4 +1800,29 @@ reset_entity_components :: proc(index: int) {
     manager.move_timers[index] = Timer{}
     manager.shot_timers[index] = Timer{}
     manager.shooters[index] = .None
+}
+
+set_game_over :: proc() {
+    g_mem.game_state = .Game_Over
+}
+
+eval_game_over :: proc() {
+    if rl.IsKeyPressed(.V) && DEBUG {
+        set_game_over()
+    }
+
+    if g_mem.game_state == .Game_Over {
+        if rl.IsKeyPressed(.SPACE) || is_gesture_tap {
+            reset_gameplay_data()
+        }
+    }
+}
+
+process_timer :: proc(timer: ^Timer) -> (is_done: bool) {
+    tick_timer(timer, rl.GetFrameTime())
+    if is_timer_done(timer^) {
+        restart_timer(timer)
+        return true
+    }
+    return false
 }
