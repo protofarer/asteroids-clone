@@ -19,7 +19,7 @@ LOGICAL_H :: 750
 PHYSICS_HZ :: 120
 FIXED_DT :: 1 / PHYSICS_HZ
 
-TIMER_INTERVAL_INTRO_MESSAGE :: 5
+TIMER_INTERVAL_INTRO_MESSAGE :: 0.5
 
 MAX_ENTITIES :: 128
 N_ASTEROID_SIDES :: 8
@@ -86,6 +86,13 @@ Game_Memory :: struct {
     level: i32,
     intro_timer: Timer,
 }
+
+touch_pos: Vec2
+touch_area: rl.Rectangle
+gestures_count: i32
+gesture_strings: [12]rune
+current_gesture: rl.Gestures
+last_gesture: rl.Gestures
 
 Game_State :: enum {
     Intro,
@@ -242,6 +249,7 @@ update :: proc() {
         }
         return
     }
+
 
     update_entities(entity_m, dt)
     handle_collisions(g_mem.manager)
@@ -600,6 +608,7 @@ game_init :: proc() {
     // spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
     // spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
     // spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
+    touch_area = {0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())} // why the unusual height (resized to full?)
 
 	game_hot_reloaded(g_mem)
 	pr_span("END game_init")
@@ -1130,13 +1139,41 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             }
         }
 
+        // Gestures
+        last_gesture = current_gesture
+        current_gesture = rl.GetGestureDetected()
+        touch_pos = rl.GetTouchPosition(0)
+        valid_touch := rl.CheckCollisionPointRec(touch_pos, touch_area)
+
+        is_gesture_tap: bool
+        is_gesture_hold: bool
+        is_gesture_hold_right: bool
+        is_gesture_hold_left: bool
+
+        if valid_touch {
+            switch {
+            case .TAP in current_gesture:
+                is_gesture_tap = true
+            
+            case .HOLD in current_gesture, .DRAG in current_gesture:
+                is_gesture_hold = true
+                if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                    is_gesture_hold_left = true
+                } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                    is_gesture_hold_right = true
+                }
+            }
+        }
+
+
+
         if rl.IsKeyPressed(.LEFT_SHIFT) || rl.IsKeyPressed(.RIGHT_SHIFT)  {
             ship_state^ = .Teleporting
             set_velocity(manager, index, {})
         }
 
-        is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W)
-        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W)
+        is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || is_gesture_hold
+        is_thrusting_up := rl.IsKeyReleased(.UP) || rl.IsKeyReleased(.W) || !is_gesture_hold
         if is_thrusting {
             tick_timer(&g_mem.thrust_draw_timer, dt)
             if is_timer_done(g_mem.thrust_draw_timer) {
@@ -1153,14 +1190,14 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
         }
 
         d_rot: f32
-        if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
+        if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) || is_gesture_hold_left {
             d_rot = -SHIP_ROTATION_MAGNITUDE
         }
-        if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
+        if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) || is_gesture_hold_right {
             d_rot = SHIP_ROTATION_MAGNITUDE
         }
 
-        if rl.IsKeyPressed(.SPACE) {
+        if rl.IsKeyPressed(.SPACE) || is_gesture_tap {
             if g_mem.ship_active_bullets < SHIP_BULLET_COUNT_LIMIT {
                 spawn_bullet_from_ship(manager)
                 rl.PlaySound(sounds[.Fire])
