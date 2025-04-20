@@ -114,6 +114,7 @@ Sound_Kind :: enum {
     Death,
     Beat_Lo,
     Beat_Hi,
+    Ufo_Alarm,
 }
 
 Entity_Id :: distinct u32
@@ -1173,6 +1174,9 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
             set_rotation(manager, index, rot + visual_rotation_rate)
 		case .Bullet:
         case .Ufo_Big, .Ufo_Small:
+            if !rl.IsSoundPlaying(sounds[.Ufo_Alarm]) {
+                rl.PlaySound(sounds[.Ufo_Alarm])
+            }
             vel := get_velocity(manager, index)
             move_timer := get_move_timer(manager, index)
             process_ufo_move(manager, index, dt, move_timer, vel, entity_type)
@@ -1189,7 +1193,7 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
         new_pos := pos + vel * dt
         set_position(manager, index, new_pos)
 
-        if (entity_type == .Ufo_Small || entity_type == .Ufo_Big) && is_out_of_bounds(new_pos) {
+        if (entity_type == .Ufo_Small || entity_type == .Ufo_Big) && is_out_of_bounds_x(new_pos) {
             append(&entities_to_destroy_behavioral, index)
         } 
 
@@ -1871,6 +1875,8 @@ load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
         file = "beat-low.wav"
     case .Beat_Hi:
         file = "beat-hi.wav"
+    case .Ufo_Alarm:
+        file = "ufo-alarm.wav"
 	}
     path := fmt.ctprintf("%v%v", base_path, file)
     return rl.LoadSound(path)
@@ -2019,6 +2025,10 @@ update_beat_sound_timer_with_level :: proc(beat_level: i32) {
 
 is_out_of_bounds :: proc(pos: Vec2) -> bool {
     return pos.x < f32(play_edge_left()) || pos.x > f32(play_edge_right()) || pos.y < f32(play_edge_top()) || pos.y > f32(play_edge_bottom())
+}
+
+is_out_of_bounds_x :: proc(pos: Vec2) -> bool {
+    return pos.x < f32(play_edge_left()) || pos.x > f32(play_edge_right())
 }
 
 process_ufo_move :: proc(entitym: ^Entity_Manager, index: int, dt: f32, move_timer: Timer, vel: Vec2, type: Entity_Type) {
