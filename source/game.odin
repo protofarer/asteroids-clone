@@ -28,8 +28,10 @@ SHIP_ROTATION_MAGNITUDE :: 5
 SHIP_MAX_SPEED :: 350
 THRUST_MAGNITUDE :: 6
 SPACE_FRICTION_COEFFICIENT :: 0.01 // cause of plasma and charged dust
-TIMER_INTERVAL_THRUST_DRAW :: 0.1
+TIMER_INTERVAL_THRUST_DRAW :: 0.075
 
+
+TIMER_INTERVAL_TELEPORT :: 1
 TIMER_INTERVAL_DEATH :: 1
 TIMER_INTERVAL_SPAWN :: 2
 TIMER_INTERVAL_BETWEEN_LEVELS :: 1
@@ -79,6 +81,7 @@ Game_Memory :: struct {
     thrust_draw_timer: Timer,
     is_thrust_drawing: bool,
     ship_active_bullets: i32,
+    teleport_timer: Timer,
 }
 
 Game_State :: enum {
@@ -91,6 +94,7 @@ Ship_State :: enum {
     Normal,
     Death,
     Spawning,
+    Teleporting,
 }
 
 Timer :: struct {
@@ -545,6 +549,10 @@ game_init :: proc() {
         accum = TIMER_INTERVAL_THRUST_DRAW,
         interval = TIMER_INTERVAL_THRUST_DRAW,
     }
+    g_mem.teleport_timer = Timer {
+        accum = TIMER_INTERVAL_TELEPORT,
+        interval = TIMER_INTERVAL_TELEPORT,
+    }
 
     sounds = &g_mem.sounds
     entity_m = g_mem.manager
@@ -633,6 +641,7 @@ draw_entities :: proc(manager: ^Entity_Manager) {
                 draw_ship_death(pos)
             case .Spawning:
                 draw_ship_spawning(pos, rot, vertices, color, dt, scale)
+            case .Teleporting:
             }
         case .Asteroid:
             radius := get_radius_physics(manager, index)
@@ -1073,6 +1082,16 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             }
             restart_timer(&g_mem.death_timer)
         }
+    case .Teleporting:
+        tick_timer(&g_mem.teleport_timer, dt)
+        if is_timer_done(g_mem.teleport_timer) {
+            rgn_pos_x := rand.float32_range(-0.4, 0.4) * f32(play_span_x())
+            rgn_pos_y := rand.float32_range(-0.4, 0.4) * f32(play_span_y())
+            new_pos := Vec2{rgn_pos_x, rgn_pos_y}
+            set_position(manager, index, new_pos)
+            ship_state^ = .Normal
+            restart_timer(&g_mem.teleport_timer)
+        }
     case .Spawning, .Normal:
         if ship_state^ == .Spawning {
             tick_timer(&g_mem.spawn_timer, dt)
@@ -1080,6 +1099,11 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
                 ship_state^ = .Normal
                 restart_timer(&g_mem.spawn_timer)
             }
+        }
+
+        if rl.IsKeyPressed(.LEFT_SHIFT) || rl.IsKeyPressed(.RIGHT_SHIFT)  {
+            ship_state^ = .Teleporting
+            set_velocity(manager, index, {})
         }
 
         is_thrusting := rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S)
@@ -1999,6 +2023,7 @@ reset_gameplay_data :: proc() {
     restart_timer(&g_mem.beat_level_timer)
     restart_timer(&g_mem.ufo_timer)
     restart_timer(&g_mem.thrust_draw_timer)
+    restart_timer(&g_mem.teleport_timer)
 
     // because the interval evolves over time
     g_mem.beat_sound_timer = Timer {
