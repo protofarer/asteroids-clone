@@ -1169,6 +1169,11 @@ update_ship :: proc(manager: ^Entity_Manager, index: int) {
             vel = dir * SHIP_MAX_SPEED
         }
 
+        speed := linalg.length(vel)
+        if speed <= 3 {
+            vel = Vec2{}
+        }
+
         set_rotation(manager, index, rot)
         set_velocity(manager, index, vel)
     } // switch/case
@@ -1186,16 +1191,13 @@ update_entities :: proc(manager: ^Entity_Manager, dt: f32) {
     // pr("free_list:",sa.slice(&manager.free_list)[:(sa.len(manager.free_list))])
     // pr_span("")
 
-    // TODO: make this a set, merge with ent_to_destroy, do at end of frame
     entities_to_destroy_behavioral: [dynamic]int
     defer delete(entities_to_destroy_behavioral)
 
     n_active_entities := get_active_entity_count(manager^)
 	for index in 0..<n_active_entities {
 
-        // TODO: set position for all, do oob outside
         // Entity Autonomous Behavior
-
         entity_type := get_entity_type(manager, index)
         pos := get_position(manager, index)
         switch entity_type {
