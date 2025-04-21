@@ -103,6 +103,13 @@ gesture_strings: [12]rune
 current_gesture: rl.Gestures
 last_gesture: rl.Gestures
 
+big_ufo_outline_vertices: [9]Vec2
+big_ufo_body_line: [2]Vec2
+big_ufo_canopy_line: [2]Vec2
+small_ufo_outline_vertices: [9]Vec2
+small_ufo_body_line: [2]Vec2
+small_ufo_canopy_line: [2]Vec2
+
 Game_State :: enum {
     Intro,
     Between_Levels,
@@ -176,7 +183,6 @@ Shooter_Type :: enum {
     Ufo,
 }
 
-
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
 	h := f32(rl.GetScreenHeight())
@@ -196,32 +202,12 @@ update :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) {
 		g_mem.run = false
 	}
-
     g_mem.is_gesture_hold = false
     g_mem.is_gesture_hold_left = false
     g_mem.is_gesture_hold_right = false
     g_mem.is_gesture_tap = false
 
-    // Gestures
-    last_gesture = current_gesture
-    current_gesture = rl.GetGestureDetected()
-    touch_pos = rl.GetTouchPosition(0)
-    valid_touch := rl.CheckCollisionPointRec(touch_pos, touch_area)
-
-    if valid_touch {
-        switch {
-        case .TAP in current_gesture:
-            g_mem.is_gesture_tap = true
-        
-        case .HOLD in current_gesture, .DRAG in current_gesture:
-            g_mem.is_gesture_hold = true
-            if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                g_mem.is_gesture_hold_left = true
-            } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
-                g_mem.is_gesture_hold_right = true
-            }
-        }
-    }
+    process_gestures()
 
     eval_game_over()
     if g_mem.game_state == .Game_Over do return
@@ -237,50 +223,14 @@ update :: proc() {
 
     update_entities(dt)
     handle_collisions()
-
-    // lifespans
-    bullets_with_expired_lifespans: [dynamic]int
-    defer delete(bullets_with_expired_lifespans)
-    for index in 0..<get_active_entity_count() {
-        type := get_entity_type(index)
-        if type == .Bullet {
-            data, _ := get_component_data(get_entity_id(index))
-            lifespan := data.lifespan
-            new_lifespan := lifespan - dt
-            if new_lifespan <= 0 {
-                append(&bullets_with_expired_lifespans, index)
-            } else {
-                set_lifespan(index, new_lifespan)
-            }
-        }
-    }
-    for index in bullets_with_expired_lifespans {
-        id := sa.get(g_mem.manager.entities, index)
-        shooter := get_shooter(index)
-        if shooter == .Ship {
-            g_mem.ship_active_bullets -= 1
-        }
-        destroy_entity(id)
-    }
+    update_lifespans()
 
     if get_score() > (get_extra_life_count() + 1) * 10000 {
         increment_extra_life_count()
     }
 
     // The pause between levels, then spawn the level
-    count := get_asteroid_count()
-    if count == 0 && g_mem.game_state == .Play {
-        g_mem.game_state = .Between_Levels
-    } else if g_mem.game_state == .Between_Levels {
-        if process_timer(&g_mem.between_levels_timer) {
-            g_mem.game_state = .Play
-            restart_timer(&g_mem.beat_level_timer)
-            restart_timer(&g_mem.beat_sound_timer)
-            g_mem.beat_level = 1
-            update_beat_sound_timer_with_level(1)
-            spawn_level()
-        }
-    }
+    level_spawn_and_transition()
 
     // Update beat levels
     if process_timer(&g_mem.beat_level_timer) {
@@ -301,6 +251,67 @@ update :: proc() {
     // Spawn Ufos
     spawner_ufo(g_mem.beat_level, dt)
 }
+
+process_gestures :: proc() {
+    last_gesture = current_gesture
+    current_gesture = rl.GetGestureDetected()
+    touch_pos = rl.GetTouchPosition(0)
+    valid_touch := rl.CheckCollisionPointRec(touch_pos, touch_area)
+    if valid_touch && current_gesture != nil {
+        switch {
+        case .TAP in current_gesture:
+            g_mem.is_gesture_tap = true
+        case .HOLD in current_gesture, .DRAG in current_gesture:
+            g_mem.is_gesture_hold = true
+            if touch_pos.x < (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                g_mem.is_gesture_hold_left = true
+            } else if touch_pos.x > (f32(rl.GetScreenWidth()) / 2) && touch_pos.y > (f32(rl.GetScreenHeight()) / 2) {
+                g_mem.is_gesture_hold_right = true
+            }
+        }
+    }
+}
+
+level_spawn_and_transition :: proc() {
+    if get_asteroid_count() == 0 && g_mem.game_state == .Play {
+        g_mem.game_state = .Between_Levels
+    } else if g_mem.game_state == .Between_Levels {
+        if process_timer(&g_mem.between_levels_timer) {
+            g_mem.game_state = .Play
+            restart_timer(&g_mem.beat_level_timer)
+            restart_timer(&g_mem.beat_sound_timer)
+            g_mem.beat_level = 1
+            update_beat_sound_timer_with_level(1)
+            spawn_level()
+        }
+    }
+}
+
+update_lifespans :: proc() {
+    bullets_with_expired_lifespans: [dynamic]int
+    defer delete(bullets_with_expired_lifespans)
+    for index in 0..<get_active_entity_count() {
+        type := get_entity_type(index)
+        if type == .Bullet {
+            data := get_component_data(get_entity_id(index))
+            lifespan := data.lifespan
+            new_lifespan := lifespan - rl.GetFrameTime()
+            if new_lifespan <= 0 {
+                append(&bullets_with_expired_lifespans, index)
+            } else {
+                set_lifespan(index, new_lifespan)
+            }
+        }
+    }
+    for index_to_expire in bullets_with_expired_lifespans {
+        shooter := get_shooter(index_to_expire)
+        if shooter == .Ship {
+            g_mem.ship_active_bullets -= 1
+        }
+        destroy_entity(index_to_expire)
+    }
+}
+
 
 spawner_ufo :: proc(beat_level: i32, dt: f32) {
     if !process_timer(&g_mem.ufo_timer) {
@@ -380,7 +391,6 @@ spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool) {
         shot_timer = shot_timer,
     }
     set_component_data(id, data_in)
-
 }
 
 get_asteroid_count :: proc() -> i32 {
@@ -458,9 +468,6 @@ draw :: proc() {
 }
 
 // Screen edges are all within play area. The drawn boundary line currently within of play area
-// TODO: make boundary line (draw_screen_edges) outside of play area
-// more aptly named, play_edge_left/top...
-// screen_left/top/right/bot should be the actual boundary lines
 play_edge_left :: proc() -> i32 {
     return i32(screen_left() + 1)
 }
@@ -479,7 +486,6 @@ play_span_x :: proc() -> i32 {
 play_span_y :: proc() -> i32 {
     return i32(play_edge_bottom() - play_edge_top())
 }
-
 draw_screen_edges :: proc() {
     rl.DrawRectangleLines(i32(screen_left()), i32(screen_top() + 1), LOGICAL_W, LOGICAL_H - 2, rl.RAYWHITE)
 }
@@ -503,21 +509,18 @@ game_init_window :: proc() {
 
 @(export)
 game_init :: proc() {
-	pr_span("IN game_init")
 	g_mem = new(Game_Memory)
-
-	manager := new(Entity_Manager)
-	manager.components = new(Components)
-
+	g_mem.manager = new(Entity_Manager)
+	g_mem.manager.components = new(Components)
     for sound_kind in Sound_Kind {
         g_mem.sounds[sound_kind] = load_sound_from_kind(sound_kind)
     }
-    g_mem.manager = manager
 	g_mem.run = true
     g_mem.ship_state = .Normal
     g_mem.game_state = .Intro
     g_mem.lives = 3
     g_mem.level = 1
+    g_mem.beat_level = 1
     g_mem.death_timer = Timer {
         accum = TIMER_INTERVAL_DEATH,
         interval = TIMER_INTERVAL_DEATH,
@@ -534,7 +537,6 @@ game_init :: proc() {
         accum = TIMER_INTERVAL_BEAT,
         interval = TIMER_INTERVAL_BEAT,
     }
-    g_mem.beat_level = 1
     g_mem.ufo_timer = Timer {
         accum = TIMER_INTERVAL_UFO,
         interval = TIMER_INTERVAL_UFO,
@@ -556,32 +558,21 @@ game_init :: proc() {
         interval = TIMER_INTERVAL_INTRO_MESSAGE,
     }
 
+    init_ufo_vertices()
+    touch_area = {0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
     g_mem.player_id = player_id
 
-    // spawn_asteroid(.Asteroid_Small, {140, 200}, {-20, -100})
-
-    // spawn_asteroid(.Asteroid_Small, {-50, 100}, {0, -100})
-    // spawn_asteroid(.Asteroid_Medium, {-100, 100}, {0, -100}, g_mem.manager)
-    // spawn_asteroid(.Asteroid_Large, {-200, 100}, {0, -100}, g_mem.manager)
-    //
-    // spawn_asteroid(.Asteroid_Small, {0, -50}, {0, 0}, g_mem.manager)
-    // spawn_asteroid(.Asteroid_Medium, {0, -100}, {0, 0}, g_mem.manager)
-    // spawn_asteroid(.Asteroid_Large, {0, -200}, {0, 0}, g_mem.manager)
-    touch_area = {0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())} // why the unusual height (resized to full?)
 
 	game_hot_reloaded(g_mem)
-	pr_span("END game_init")
 }
 
-
-// Here you can also set your own global variables. A good idea is to make
-// your global variables into pointers that point to something inside
-// `g_mem`.
 @(export)
 game_hot_reloaded :: proc(mem: rawptr) { 
     g_mem = (^Game_Memory)(mem) 
 }
+
 @(export)
 game_should_run :: proc() -> bool {
 	when ODIN_OS != .JS {
@@ -592,6 +583,7 @@ game_should_run :: proc() -> bool {
 	}
 	return g_mem.run
 }
+
 @(export)
 game_shutdown :: proc() { 
     for sound in g_mem.sounds {
@@ -599,16 +591,31 @@ game_shutdown :: proc() {
     }
     free(g_mem) 
 }
+
 @(export)
-game_shutdown_window :: proc() { rl.CloseWindow() }
+game_shutdown_window :: proc() { 
+    rl.CloseWindow() 
+}
+
 @(export)
-game_memory :: proc() -> rawptr { return g_mem }
+game_memory :: proc() -> rawptr { 
+    return g_mem 
+}
+
 @(export)
-game_memory_size :: proc() -> int { return size_of(Game_Memory) }
+game_memory_size :: proc() -> int { 
+    return size_of(Game_Memory) 
+}
+
 @(export)
-game_force_reload :: proc() -> bool { return rl.IsKeyPressed(.F6) || rl.IsKeyPressed(.R) }
+game_force_reload :: proc() -> bool { 
+    return rl.IsKeyPressed(.F6) || rl.IsKeyPressed(.R) 
+}
+
 @(export)
-game_force_restart :: proc() -> bool { return rl.IsKeyPressed(.F7) }
+game_force_restart :: proc() -> bool { 
+    return rl.IsKeyPressed(.F7) 
+}
 
 // In a web build, this is called when browser changes size. Remove the
 // `rl.SetWindowSize` call if you don't want a resizable game.
@@ -644,48 +651,119 @@ draw_entities :: proc() {
             draw_bullet(pos)
         case .Ufo_Big, .Ufo_Small:
             draw_ufo(pos, entity_type)
-            physics_radius := get_radius_physics(index)
-            if DEBUG do rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
+            if DEBUG {
+                physics_radius := get_radius_physics(index)
+                 rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
+            }
         case .None:
         }
     }
 }
 
-draw_ufo :: proc(pos: Vec2, entity_type: Entity_Type) {
-    is_ufo_big := entity_type == .Ufo_Big
-    r :f32= is_ufo_big ? BIG_UFO_RADIUS : SMALL_UFO_RADIUS
-    b :f32= r // body half length
-    s1 :f32= r * 0.4 // top and bottom body half lengths
-    h1 :f32= r * 0.37 // body half height, canopy height
-    c1 :f32= r * 0.25 // canopy half length
-    outline_vertices := [?]Vec2 {
-        {-b, 0},
-        {-s1, -h1},
-        {-c1, -2*h1},
-        {c1, -2*h1},
-        {s1, -h1},
-        {b, 0},
-        {s1, h1},
-        {-s1, h1},
-        {-b, 0},
-    }
-
+init_ufo_vertices :: proc() {
     offset := Vec2{0, 1} // fit better within collision circle
-    d_pos := pos + offset
-    for i in 0..<len(outline_vertices) - 1 {
-        rl.DrawLineV(outline_vertices[i] + d_pos, outline_vertices[i+1] + d_pos, rl.RAYWHITE)
-    }
-    body_line := [?]Vec2{
-        {-b, 0},
-        {b, 0},
-    }
-    rl.DrawLineV(body_line[0] + d_pos, body_line[1] + d_pos, rl.RAYWHITE)
+    {
+        r :f32= BIG_UFO_RADIUS
+        b :f32= r // body half length
+        s1 :f32= r * 0.4 // top and bottom body half lengths
+        h1 :f32= r * 0.37 // body half height, canopy height
+        c1 :f32= r * 0.25 // canopy half length
+        outline_vertices := [?]Vec2 {
+            {-b, 0},
+            {-s1, -h1},
+            {-c1, -2*h1},
+            {c1, -2*h1},
+            {s1, -h1},
+            {b, 0},
+            {s1, h1},
+            {-s1, h1},
+            {-b, 0},
+        }
+        for &v in outline_vertices {
+            v += offset
+        }
+        big_ufo_outline_vertices = outline_vertices
 
-    canopy_line := [?]Vec2{
-        {-s1, -h1},
-        {s1, -h1},
+        body_line := [?]Vec2{
+            {-b, 0},
+            {b, 0},
+        }
+        for &v in body_line {
+            v += offset
+        }
+        big_ufo_body_line = body_line
+
+        canopy_line := [?]Vec2{
+            {-s1, -h1},
+            {s1, -h1},
+        }
+        for &v in canopy_line {
+            v += offset
+        }
+        big_ufo_canopy_line = canopy_line
     }
-    rl.DrawLineV(canopy_line[0] + d_pos, canopy_line[1] + d_pos, rl.RAYWHITE)
+    {
+        r :f32= SMALL_UFO_RADIUS
+        b :f32= r // body half length
+        s1 :f32= r * 0.4 // top and bottom body half lengths
+        h1 :f32= r * 0.37 // body half height, canopy height
+        c1 :f32= r * 0.25 // canopy half length
+        outline_vertices := [?]Vec2 {
+            {-b, 0},
+            {-s1, -h1},
+            {-c1, -2*h1},
+            {c1, -2*h1},
+            {s1, -h1},
+            {b, 0},
+            {s1, h1},
+            {-s1, h1},
+            {-b, 0},
+        }
+        for &v in outline_vertices {
+            v += offset
+        }
+        small_ufo_outline_vertices = outline_vertices
+        body_line := [?]Vec2{
+            {-b, 0},
+            {b, 0},
+        }
+        for &v in body_line {
+            v += offset
+        }
+        small_ufo_body_line = body_line
+
+        canopy_line := [?]Vec2{
+            {-s1, -h1},
+            {s1, -h1},
+        }
+        for &v in canopy_line {
+            v += offset
+        }
+        small_ufo_canopy_line = canopy_line
+    }
+}
+
+draw_ufo :: proc(pos: Vec2, entity_type: Entity_Type) {
+    outline_vertices: [9]Vec2
+    body_line: [2]Vec2
+    canopy_line: [2]Vec2
+    if entity_type == .Ufo_Big {
+        outline_vertices =  big_ufo_outline_vertices 
+        body_line = big_ufo_body_line
+        canopy_line = big_ufo_canopy_line
+    } else if entity_type == .Ufo_Small {
+        outline_vertices = small_ufo_outline_vertices
+        body_line = small_ufo_body_line
+        canopy_line = small_ufo_canopy_line
+    } else {
+        s := fmt.aprintf("Invalid entity_type for draw_ufo: %v", entity_type)
+        log_warn(s)
+    }
+    for i in 0..<len(outline_vertices) - 1 {
+        rl.DrawLineV(outline_vertices[i] + pos, outline_vertices[i+1] + pos, rl.RAYWHITE)
+    }
+    rl.DrawLineV(body_line[0] + pos, body_line[1] + pos, rl.RAYWHITE)
+    rl.DrawLineV(canopy_line[0] + pos, canopy_line[1] + pos, rl.RAYWHITE)
 }
 
 draw_bullet :: proc(pos: Vec2) {
@@ -841,25 +919,23 @@ Component_Data :: struct {
     shooter: Shooter_Type,
 }
 
-// NOTE: remember to update this for every new component!
-get_component_data :: proc(id: Entity_Id) -> (Component_Data, bool) {
+get_component_data :: proc(id: Entity_Id) -> Component_Data {
     index, ok := g_mem.manager.entity_to_index[id]
-
-    if !ok do return {}, false
-
-    data: Component_Data
-    // case request.type == true:
-    //     data.type = get_entity_type(manager, index)
-    data.position = g_mem.manager.components.positions[index]
-    data.velocity = g_mem.manager.components.velocities[index]
-    data.rotation = g_mem.manager.components.rotations[index]
-    data.radius_physics = g_mem.manager.components.radii_physics[index]
-    data.lifespan = g_mem.manager.components.lifespans[index]
-    data.visual_rotation_rate = g_mem.manager.components.visual_rotation_rates[index]
-    data.move_timer = g_mem.manager.components.move_timers[index]
-    data.shot_timer = g_mem.manager.components.shot_timers[index]
-    data.shooter = g_mem.manager.components.shooters[index]
-    return data, true
+    if !ok {
+        log_warn("Failed to spawn bullet because ship data nil")
+        return {}
+    }
+    return Component_Data{
+        position = g_mem.manager.components.positions[index],
+        velocity = g_mem.manager.components.velocities[index],
+        rotation = g_mem.manager.components.rotations[index],
+        radius_physics = g_mem.manager.components.radii_physics[index],
+        lifespan = g_mem.manager.components.lifespans[index],
+        visual_rotation_rate = g_mem.manager.components.visual_rotation_rates[index],
+        move_timer = g_mem.manager.components.move_timers[index],
+        shot_timer = g_mem.manager.components.shot_timers[index],
+        shooter = g_mem.manager.components.shooters[index],
+    }
 }
 get_position :: proc(idx: int) -> Vec2 {
     return g_mem.manager.components.positions[idx]
@@ -952,7 +1028,8 @@ _pop_back_entity :: proc() -> (Entity_Type, Component_Data, Entity_Id, int) {
     return type, data, last_id, last_index
 }
 
-destroy_entity :: proc(id_to_destroy: Entity_Id) {
+destroy_entity :: proc(index_to_destroy: int) {
+    id_to_destroy := get_entity_id(index_to_destroy)
     manager := g_mem.manager
     index_to_swap, ok := manager.entity_to_index[id_to_destroy]
     if !ok {
@@ -1084,7 +1161,7 @@ update_entities :: proc( dt: f32) {
         // Entity Autonomous Behavior
         entity_type := get_entity_type(index)
         id := get_entity_id(index)
-        data, _ := get_component_data(id)
+        data := get_component_data(id)
         switch entity_type {
 		case .Ship:
             update_ship(index)
@@ -1131,12 +1208,11 @@ update_entities :: proc( dt: f32) {
         }
     }
     for index_to_destroy in entities_to_destroy_behavioral {
-        id := get_entity_id(index_to_destroy)
         shooter := get_shooter(index_to_destroy)
         if shooter == .Ship {
             g_mem.ship_active_bullets -= 1
         }
-        destroy_entity(id)
+        destroy_entity(index_to_destroy)
     }
 }
 
@@ -1274,12 +1350,11 @@ handle_collisions :: proc() {
     }
 
     for index_to_destroy in entities_to_destroy {
-        id := get_entity_id(index_to_destroy)
         shooter := get_shooter(index_to_destroy)
         if shooter == .Ship {
             g_mem.ship_active_bullets -= 1
         }
-        destroy_entity(id)
+        destroy_entity(index_to_destroy)
     }
 
     for data in asteroids_to_spawn {
@@ -1510,22 +1585,17 @@ spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2) {
 }
 
 spawn_bullet_from_ship :: proc() {
-    ship_data, ship_ok := get_component_data(get_player_id())
-    if !ship_ok {
-        log_warn("Failed to spawn bullet because ship data nil")
-        return
-    }
+    data := get_component_data(get_player_id())
 
-    ship_rotation := ship_data.rotation
+    ship_rotation := data.rotation
     rotation_vector := angle_radians_to_vec(ship_rotation)
+    ship_position := data.position
 
-    ship_position := ship_data.position
-
-    pos := ship_position + rotation_vector * SHIP_R
+    bullet_position := ship_position + rotation_vector * SHIP_R
     velocity := rotation_vector * BULLET_SPEED
 
     g_mem.ship_active_bullets += 1
-    spawn_bullet(pos, velocity, .Ship)
+    spawn_bullet(bullet_position, velocity, .Ship)
 }
 
 angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
