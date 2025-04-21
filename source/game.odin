@@ -6,6 +6,7 @@ import sa "core:container/small_array"
 import math "core:math"
 import linalg "core:math/linalg"
 import rand "core:math/rand"
+import "core:log"
 
 pr :: fmt.println
 Vec2 :: rl.Vector2
@@ -173,7 +174,7 @@ Entity_Manager :: struct {
 	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
 	types: [MAX_ENTITIES]Entity_Type, // CSDR moving this under gameplay or other?? the data flow (set/get) is disjointed
 	entity_to_index: map[Entity_Id]int,
-    using components: ^Components,
+    using components: ^Components(MAX_ENTITIES),
 }
 
 Entity_Type :: enum { 
@@ -187,16 +188,16 @@ Entity_Type :: enum {
     Ufo_Small,
 }
 
-Components:: struct {
-	positions: [MAX_ENTITIES]Vec2,
-	velocities: [MAX_ENTITIES]Vec2,
-	rotations: [MAX_ENTITIES]f32,
-	radii_physics: [MAX_ENTITIES]f32,
-    lifespans: [MAX_ENTITIES]f32,
-    shot_timers: [MAX_ENTITIES]Timer,
-    move_timers: [MAX_ENTITIES]Timer,
-    shooters: [MAX_ENTITIES]Shooter_Type,
-	visual_rotation_rates: [MAX_ENTITIES]f32, // asteroid visual rotation
+Components:: struct ($N: int) {
+	positions: [N]Vec2,
+	velocities: [N]Vec2,
+	rotations: [N]f32,
+	radii_physics: [N]f32,
+    lifespans: [N]f32,
+    shot_timers: [N]Timer,
+    move_timers: [N]Timer,
+    shooters: [N]Shooter_Type,
+	visual_rotation_rates: [N]f32, // asteroid visual rotation
 }
 
 Shooter_Type :: enum {
@@ -526,6 +527,7 @@ game_update :: proc() {
 
 @(export)
 game_init_window :: proc() {
+    log.info("init window")
     // .Borderlesswindowedmode, .fullscreen_mode, window_maximized
 	rl.SetConfigFlags({.VSYNC_HINT,  .WINDOW_RESIZABLE, .WINDOW_MAXIMIZED})
 	rl.InitWindow(WINDOW_W, WINDOW_H, "Asteroids")
@@ -537,9 +539,11 @@ game_init_window :: proc() {
 
 @(export)
 game_init :: proc() {
+    log.info("init game")
+    context.logger = log.create_console_logger()
 	g_mem = new(Game_Memory)
 	g_mem.manager = new(Entity_Manager)
-	g_mem.manager.components = new(Components)
+	g_mem.manager.components = new(Components(MAX_ENTITIES))
     for sound_kind in Sound_Kind {
         g_mem.sounds[sound_kind] = load_sound_from_kind(sound_kind)
     }
@@ -786,8 +790,7 @@ draw_ufo :: proc(pos: Vec2, entity_type: Entity_Type) {
         body_line = small_ufo_body_line
         canopy_line = small_ufo_canopy_line
     } else {
-        s := fmt.aprintf("Invalid entity_type for draw_ufo: %v", entity_type)
-        log_warn(s)
+        log.warnf("Invalid entity_type for draw_ufo: %v", entity_type)
         rl.DrawRectangleV(pos, {5, 5}, rl.RED)
         return
     }
@@ -910,7 +913,7 @@ create_entity :: proc( type: Entity_Type) -> Entity_Id {
     manager := g_mem.manager
     index := get_active_entity_count()
 	if index > MAX_ENTITIES {
-		log_warn("Failed to create entity, max entities reached")
+		log.warn("Failed to create entity, max entities reached")
         return 99999
 	}
 
@@ -945,7 +948,7 @@ get_component_data :: proc(id: Entity_Id) -> Component_Data {
     index, ok := g_mem.manager.entity_to_index[id]
     if !ok {
         s := fmt.aprintf("Failed to spawn bullet, no index mapped to id:", id)
-        log_warn(s)
+        log.warn(s)
         return {}
     }
     return Component_Data{
@@ -965,7 +968,7 @@ set_component_data :: proc(id: Entity_Id, data: Component_Data) -> bool {
     idx, ok_idx := g_mem.manager.entity_to_index[id]
     if !ok_idx {
         s := fmt.aprint("Failed to set component data, no index mapped to id:", id)
-        log_warn(s)
+        log.warn(s)
         return false
     }
     set_position(idx, data.position)
@@ -1059,7 +1062,7 @@ destroy_entity :: proc(index_to_destroy: int) {
     index_to_swap, ok := manager.entity_to_index[id_to_destroy]
     if !ok {
         s := fmt.aprintf("Failed to destroy entity, no index mapped to id:", id_to_destroy)
-        log_warn(s)
+        log.warn(s)
         return
     }
     // Get the last active entity. active_count--
@@ -1517,11 +1520,11 @@ get_player_id :: proc() -> Entity_Id {
 
 get_player_index :: proc() -> int {
 	index, ok := g_mem.manager.entity_to_index[g_mem.player_id]
-	if ok {
-		return index
+	if !ok {
+        log.warn("Player entity id not in entity_to_index map")
+        return -1
 	}
-	log_warn("Player entity id not in entity_to_index map")
-	return -1
+    return index
 }
 
 get_entity_id :: proc(index: int) -> Entity_Id {
@@ -1543,10 +1546,6 @@ screen_bottom :: proc() -> f32 {
 
 pr_span :: proc(msg: Maybe(string)) {
     pr("-----------------------", msg.? or_else "", "-----------------------")
-}
-
-log_warn :: proc(msg: Maybe(string), loc := #caller_location) {
-	fmt.printfln("[%v]WARN: %v", loc, msg.? or_else "")
 }
 
 spawn_ship :: proc(pos: Vec2, rot: f32) -> Entity_Id {
