@@ -22,7 +22,7 @@ FIXED_DT :: 1 / PHYSICS_HZ
 
 MAX_ENTITIES :: 64
 
-TIMER_INTERVAL_INTRO_MESSAGE :: 0.5
+TIMER_INTERVAL_INTRO_MESSAGE :: 4
 TIMER_INTERVAL_BETWEEN_LEVELS :: 2
 
 SHIP_R :: 22
@@ -233,11 +233,6 @@ update :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) {
 		g_mem.run = false
 	}
-    g_mem.is_gesture_hold = false
-    g_mem.is_gesture_hold_left = false
-    g_mem.is_gesture_hold_right = false
-    g_mem.is_gesture_tap = false
-
     process_gestures()
 
     eval_game_over()
@@ -260,16 +255,16 @@ update :: proc() {
         increment_extra_life_count()
     }
 
-    // The pause between levels, then spawn the level
+    // Level spawning and between-level pause
     level_spawn_and_transition()
 
-    // Update beat levels
+    // beat level
     if process_timer(&g_mem.beat_level_timer) {
         g_mem.beat_level = clamp(g_mem.beat_level + 1, 1, 4)
         update_beat_sound_timer_with_level(g_mem.beat_level)
     }
 
-    // Play beat sound IAW beat level
+    // beat sound
     if process_timer(&g_mem.beat_sound_timer) {
         if g_mem.is_beat_sound_hi {
             rl.PlaySound(g_mem.sounds[.Beat_Hi])
@@ -284,6 +279,11 @@ update :: proc() {
 }
 
 process_gestures :: proc() {
+    g_mem.is_gesture_hold = false
+    g_mem.is_gesture_hold_left = false
+    g_mem.is_gesture_hold_right = false
+    g_mem.is_gesture_tap = false
+
     last_gesture = current_gesture
     current_gesture = rl.GetGestureDetected()
     touch_pos = rl.GetTouchPosition(0)
@@ -347,7 +347,7 @@ spawner_ufo :: proc(beat_level: i32, dt: f32) {
     if !process_timer(&g_mem.ufo_timer) {
         return
     }
-    restart_timer(&g_mem.ufo_timer)
+    // restart_timer(&g_mem.ufo_timer)
 
     base_chance_big : f32 = BASE_CHANCE_SPAWN_BIG
     big_spawn_factor := base_chance_big * (1 + f32(beat_level) * 0.07)
@@ -477,7 +477,7 @@ play_span_y :: proc() -> i32 {
     return i32(play_edge_bottom() - play_edge_top())
 }
 draw_screen_edges :: proc() {
-    rl.DrawRectangleLines(i32(screen_left()), i32(screen_top() + 1), LOGICAL_W, LOGICAL_H - 2, rl.RAYWHITE)
+    rl.DrawRectangleLines(i32(screen_left() + 1), i32(screen_top() + 1), LOGICAL_W - 2, LOGICAL_H - 2, rl.RAYWHITE)
 }
 
 @(export)
@@ -490,7 +490,7 @@ game_update :: proc() {
 game_init_window :: proc() {
     log.info("init window")
     // .Borderlesswindowedmode, .fullscreen_mode, window_maximized
-	rl.SetConfigFlags({.VSYNC_HINT,  .WINDOW_RESIZABLE, .WINDOW_MAXIMIZED})
+	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_RESIZABLE})
 	rl.InitWindow(WINDOW_W, WINDOW_H, "Asteroids")
 	rl.SetWindowPosition(50, 150)
 	rl.SetTargetFPS(PHYSICS_HZ)
@@ -1362,26 +1362,22 @@ get_score :: proc() -> i32 {
 }
 
 draw_ui :: proc() {
+    sw := f32(rl.GetScreenWidth())
+    sh := f32(rl.GetScreenHeight())
     if g_mem.game_state == .Intro {
         rl.DrawText(
             fmt.ctprint("Thruster = W/Up\n\nRotate = A,D/Left,Right arrows\n\nFire = Space\n\nTeleport = Shift"),
-            WINDOW_W * 3 / 8, WINDOW_H * 3 / 5, 30, rl.RAYWHITE,
+            i32(sw * 3 / 8), i32(sh * 3 / 5), 30, rl.RAYWHITE,
         )
     }
-    rl.DrawText(
-        fmt.ctprintf(
-            "%v",
-            get_score(),
-        ),
-        75, 30, 42, rl.RAYWHITE,
-    )
+    rl.DrawText(fmt.ctprintf("%v", get_score()), i32(sw * 2 / 8), i32(sh / 15), 42, rl.RAYWHITE)
     for i in 0..<g_mem.lives {
-        draw_ship({90 + f32(i) * (SHIP_R * 1.7), 110}, math.to_radians(f32(-90)), 0.75)
+        draw_ship({(sw * 2 / 8) + f32(i) * (SHIP_R * 1.7), sh / 7}, math.to_radians(f32(-90)), 0.75)
     }
     if g_mem.game_state == .Game_Over {
         rl.DrawText(
             fmt.ctprint("GAME OVER\n\nHit Space to play again"),
-            WINDOW_W * 3 / 8, WINDOW_H / 2, 40, rl.RAYWHITE,
+            i32(sw * 3 / 8), i32(sh / 2), 40, rl.RAYWHITE,
         )
     }
 }
