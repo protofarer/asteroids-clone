@@ -11,7 +11,7 @@ import "core:log"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-DEBUG :: false
+DEBUG :: true
 WINDOW_W :: 1000
 WINDOW_H :: 750
 LOGICAL_W :: 1000
@@ -101,40 +101,6 @@ Game_Memory :: struct {
 }
 g_mem: ^Game_Memory
 
-touch_pos: Vec2
-touch_area: rl.Rectangle
-current_gesture: rl.Gestures
-last_gesture: rl.Gestures
-
-ship_vertices: [5]Vec2
-ship_thrust_vertices: [3]Vec2
-death_particles_start_positions := [?]Vec2{
-    {10, 0},
-    {5, 5},
-    {0, 10},
-    {-5, 5},
-    {0, -10},
-    {-5, -5},
-    {-10, 0},
-    {5, -5},
-}
-death_particles_end_positions := [?]Vec2{
-    {50, 0},
-    {25, 25},
-    {0,50},
-    {-25, 25},
-    {0,-50},
-    {-25, -25},
-    {-50, 0},
-    {25, -25},
-}
-big_ufo_outline_vertices: [9]Vec2
-big_ufo_body_line: [2]Vec2
-big_ufo_canopy_line: [2]Vec2
-small_ufo_outline_vertices: [9]Vec2
-small_ufo_body_line: [2]Vec2
-small_ufo_canopy_line: [2]Vec2
-
 Game_State :: enum {
     Intro,
     Between_Levels,
@@ -170,7 +136,8 @@ Sound_Kind :: enum {
 Entity_Id :: distinct u32
 
 Entity_Manager :: struct {
-	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id), // len used as active_entity_count, order doesn't align with components
+	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id),
+    n_active: int,
 	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
 	types: [MAX_ENTITIES]Entity_Type, // CSDR moving this under gameplay or other?? the data flow (set/get) is disjointed
 	entity_to_index: map[Entity_Id]int,
@@ -211,6 +178,40 @@ Spawn_Asteroid_Data :: struct {
     pos: Vec2,
     vel: Vec2,
 }
+
+touch_pos: Vec2
+touch_area: rl.Rectangle
+current_gesture: rl.Gestures
+last_gesture: rl.Gestures
+
+ship_vertices: [5]Vec2
+ship_thrust_vertices: [3]Vec2
+death_particles_start_positions := [?]Vec2{
+    {10, 0},
+    {5, 5},
+    {0, 10},
+    {-5, 5},
+    {0, -10},
+    {-5, -5},
+    {-10, 0},
+    {5, -5},
+}
+death_particles_end_positions := [?]Vec2{
+    {50, 0},
+    {25, 25},
+    {0,50},
+    {-25, 25},
+    {0,-50},
+    {-25, -25},
+    {-50, 0},
+    {25, -25},
+}
+big_ufo_outline_vertices: [9]Vec2
+big_ufo_body_line: [2]Vec2
+big_ufo_canopy_line: [2]Vec2
+small_ufo_outline_vertices: [9]Vec2
+small_ufo_body_line: [2]Vec2
+small_ufo_canopy_line: [2]Vec2
 
 game_camera :: proc() -> rl.Camera2D {
 	w := f32(rl.GetScreenWidth())
@@ -594,6 +595,8 @@ game_init :: proc() {
     init_ship_vertices()
     init_ship_thrust_vertices()
     touch_area = {0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+    current_gesture = nil
+    last_gesture = nil
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
     g_mem.player_id = player_id
@@ -898,21 +901,21 @@ rotate_point :: proc(point: Vec2, center: Vec2, rot: f32 /* rad */) -> Vec2 {
 }
 
 get_last_entity_index :: proc() -> int {
-    return sa.len(g_mem.manager.entities) - 1
+    return g_mem.manager.n_active - 1
 }
 
 get_active_entity_count :: proc() -> int {
-    return sa.len(g_mem.manager.entities)
+    return g_mem.manager.n_active
 }
 
 generate_entity_id :: proc() -> Entity_Id {
     return Entity_Id(get_active_entity_count())
 }
 
-create_entity :: proc( type: Entity_Type) -> Entity_Id {
+create_entity :: proc(entity_type: Entity_Type) -> Entity_Id {
     manager := g_mem.manager
-    index := get_active_entity_count()
-	if index > MAX_ENTITIES {
+    index := manager.n_active
+	if index >= MAX_ENTITIES {
 		log.warn("Failed to create entity, max entities reached")
         return 99999
 	}
@@ -921,15 +924,60 @@ create_entity :: proc( type: Entity_Type) -> Entity_Id {
     id: Entity_Id
     if sa.len(manager.free_list) > 0 {
         id = sa.pop_back(&manager.free_list)
-        reset_entity_components(index)
+        reset_entity_components(index) // WARN: not sure if needed in this index based system
     } else {
         id = generate_entity_id()
     }
     sa.append(&manager.entities, id)
-    set_entity_type(index, type)
+    g_mem.manager.n_active += 1
+    set_entity_type(index, entity_type)
     manager.entity_to_index[id] = index
     return id
 }
+
+destroy_entity :: proc(index_to_destroy: int) {
+    id_to_destroy := get_entity_id(index_to_destroy)
+    manager := g_mem.manager
+    index_to_swap, ok := manager.entity_to_index[id_to_destroy]
+    if !ok {
+        s := fmt.aprintf("Failed to destroy entity, no index mapped to id:", id_to_destroy)
+        log.warn(s)
+        return
+    }
+    // Get the last active entity. n_active--
+    type, swap_data, last_id, last_index_before_pop := _pop_back_entity()
+
+    // Swap components only if entity_destroyed isn't last entity
+    if index_to_swap != last_index_before_pop {
+        set_entity_type(index_to_swap, type)
+        set_component_data(id_to_destroy, swap_data)
+    }
+
+    sa.set(&manager.entities, index_to_swap, last_id)
+    manager.entity_to_index[last_id] = index_to_swap
+    sa.append(&manager.free_list, id_to_destroy)
+    delete_key(&manager.entity_to_index, id_to_destroy)
+}
+
+_pop_back_entity :: proc() -> (Entity_Type, Component_Data, Entity_Id, int) {
+    last_index := get_last_entity_index()
+    type := get_entity_type(last_index)
+    last_id := sa.pop_back(&g_mem.manager.entities)
+    g_mem.manager.n_active -= 1
+    data := Component_Data{
+        position = g_mem.manager.positions[last_index],
+        velocity = g_mem.manager.velocities[last_index],
+        rotation = g_mem.manager.rotations[last_index],
+        radius_physics = g_mem.manager.radii_physics[last_index],
+        lifespan = g_mem.manager.lifespans[last_index],
+        visual_rotation_rate = g_mem.manager.visual_rotation_rates[last_index],
+        move_timer = g_mem.manager.move_timers[last_index],
+        shot_timer = g_mem.manager.shot_timers[last_index],
+        shooter = g_mem.manager.shooters[last_index],
+    }
+    return type, data, last_id, last_index
+}
+
 
 // NOTE: remember to update this component code for every new component!
 Component_Data :: struct {
@@ -1036,48 +1084,6 @@ set_shot_timer :: proc(idx: int, val: Timer) {
 }
 set_shooter :: proc(idx: int, val: Shooter_Type) {
     g_mem.manager.components.shooters[idx] = val
-}
-
-_pop_back_entity :: proc() -> (Entity_Type, Component_Data, Entity_Id, int) {
-    last_index := get_last_entity_index()
-    type := get_entity_type(last_index)
-    last_id := sa.pop_back(&g_mem.manager.entities)
-    data := Component_Data{
-        position = g_mem.manager.positions[last_index],
-        velocity = g_mem.manager.velocities[last_index],
-        rotation = g_mem.manager.rotations[last_index],
-        radius_physics = g_mem.manager.radii_physics[last_index],
-        lifespan = g_mem.manager.lifespans[last_index],
-        visual_rotation_rate = g_mem.manager.visual_rotation_rates[last_index],
-        move_timer = g_mem.manager.move_timers[last_index],
-        shot_timer = g_mem.manager.shot_timers[last_index],
-        shooter = g_mem.manager.shooters[last_index],
-    }
-    return type, data, last_id, last_index
-}
-
-destroy_entity :: proc(index_to_destroy: int) {
-    id_to_destroy := get_entity_id(index_to_destroy)
-    manager := g_mem.manager
-    index_to_swap, ok := manager.entity_to_index[id_to_destroy]
-    if !ok {
-        s := fmt.aprintf("Failed to destroy entity, no index mapped to id:", id_to_destroy)
-        log.warn(s)
-        return
-    }
-    // Get the last active entity. active_count--
-    type, swap_data, last_id, last_index_before_pop := _pop_back_entity()
-
-    // Swap components only if entity_destroyed isn't last entity
-    if index_to_swap != last_index_before_pop {
-        set_entity_type(index_to_swap, type)
-        set_component_data(id_to_destroy, swap_data)
-    }
-
-    sa.set(&manager.entities, index_to_swap, last_id)
-    manager.entity_to_index[last_id] = index_to_swap
-    sa.append(&manager.free_list, id_to_destroy)
-    delete_key(&manager.entity_to_index, id_to_destroy)
 }
 
 update_ship :: proc(index: int) {
@@ -1756,17 +1762,16 @@ reset_gameplay_data :: proc() {
     }
 
     // Reset Entity Manager
-    sa.resize(&g_mem.manager.entities, 0)
-    sa.resize(&g_mem.manager.free_list, 0)
-    g_mem.manager.types = {}
-    clear(&g_mem.entity_to_index)
-    g_mem.manager.components^ = {}
+    free(g_mem.manager.components)
+    free(g_mem.manager)
+    g_mem.manager = new(Entity_Manager)
+	g_mem.manager.components = new(Components(MAX_ENTITIES))
+    current_gesture = nil
+    last_gesture = nil
 
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
     g_mem.player_id = player_id
 
-    current_gesture = nil
-    last_gesture = nil
 }
 
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
