@@ -139,10 +139,10 @@ Entity_Manager :: struct {
 	entities: sa.Small_Array(MAX_ENTITIES, Entity_Id),
     n_active: int,
 	free_list: sa.Small_Array(MAX_ENTITIES, Entity_Id),
-	types: [MAX_ENTITIES]Entity_Type, // CSDR moving this under gameplay or other?? the data flow (set/get) is disjointed
 	entity_to_index: map[Entity_Id]int,
-    using components: ^Components(MAX_ENTITIES),
+    components: ^#soa[MAX_ENTITIES]Big_Component,
 }
+components: ^#soa[MAX_ENTITIES]Big_Component
 
 Entity_Type :: enum { 
     None,
@@ -155,16 +155,17 @@ Entity_Type :: enum {
     Ufo_Small,
 }
 
-Components:: struct ($N: int) {
-	positions: [N]Vec2,
-	velocities: [N]Vec2,
-	rotations: [N]f32,
-	radii_physics: [N]f32,
-    lifespans: [N]f32,
-    shot_timers: [N]Timer,
-    move_timers: [N]Timer,
-    shooters: [N]Shooter_Type,
-	visual_rotation_rates: [N]f32, // asteroid visual rotation
+Big_Component :: struct {
+    type: Entity_Type,
+	position: Vec2,
+	velocity: Vec2,
+	rotation: f32,
+	radius: f32,
+    lifespan: f32,
+    shot_timer: Timer,
+    move_timer: Timer,
+    shooter: Shooter_Type,
+	visual_rotation_rate: f32, // asteroid visual rotation
 }
 
 Shooter_Type :: enum {
@@ -321,20 +322,19 @@ update_lifespans :: proc() {
     bullets_with_expired_lifespans: [dynamic]int
     defer delete(bullets_with_expired_lifespans)
     for index in 0..<get_active_entity_count() {
-        type := get_entity_type(index)
+        type := components[index].type
         if type == .Bullet {
-            data := get_component_data(get_entity_id(index))
-            lifespan := data.lifespan
+            lifespan := components[index].lifespan
             new_lifespan := lifespan - rl.GetFrameTime()
             if new_lifespan <= 0 {
                 append(&bullets_with_expired_lifespans, index)
             } else {
-                set_lifespan(index, new_lifespan)
+                components[index].lifespan = new_lifespan
             }
         }
     }
     for index_to_expire in bullets_with_expired_lifespans {
-        shooter := get_shooter(index_to_expire)
+        shooter := components[index_to_expire].shooter
         if shooter == .Ship {
             g_mem.ship_active_bullets -= 1
         }
@@ -383,50 +383,10 @@ spawner_ufo :: proc(beat_level: i32, dt: f32) {
     }
 }
 
-spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool) {
-    id := create_entity(entity_type)
-    radius: f32
-    move_timer: Timer
-    shot_timer: Timer
-    speed: f32
-    #partial switch entity_type {
-    case .Ufo_Big:
-        radius = BIG_UFO_RADIUS
-        move_timer = Timer{
-            interval = TIMER_INTERVAL_UFO_BIG_MOVE,
-            accum = TIMER_INTERVAL_UFO_BIG_MOVE,
-        }
-        shot_timer = Timer{
-            interval = TIMER_INTERVAL_UFO_BIG_SHOOT,
-            accum = TIMER_INTERVAL_UFO_BIG_SHOOT,
-        }
-        speed = BIG_UFO_SPEED
-    case .Ufo_Small:
-        radius = SMALL_UFO_RADIUS
-        move_timer = Timer{
-            interval = TIMER_INTERVAL_UFO_SMALL_MOVE,
-            accum = TIMER_INTERVAL_UFO_SMALL_MOVE,
-        }
-        shot_timer = Timer{
-            interval = TIMER_INTERVAL_UFO_SMALL_SHOOT,
-            accum = TIMER_INTERVAL_UFO_SMALL_SHOOT,
-        }
-        speed = SMALL_UFO_SPEED
-    }
-    data_in := Component_Data{
-        position = pos,
-        velocity = is_moving_right ? Vec2{speed,0} : Vec2{-speed,0},
-        radius_physics = radius * 0.8,
-        move_timer = move_timer,
-        shot_timer = shot_timer,
-    }
-    set_component_data(id, data_in)
-}
-
 get_asteroid_count :: proc() -> i32 {
     count : i32 = 0
     for i in 0..<get_active_entity_count() {
-        if g_mem.manager.types[i] == .Asteroid_Large || g_mem.manager.types[i] == .Asteroid_Medium || g_mem.manager.types[i] == .Asteroid_Small {
+        if components.type[i] == .Asteroid_Large || components.type[i] == .Asteroid_Medium || components.type[i] == .Asteroid_Small {
             count += 1
         }
     }
@@ -533,7 +493,7 @@ game_init_window :: proc() {
 	rl.SetConfigFlags({.VSYNC_HINT,  .WINDOW_RESIZABLE, .WINDOW_MAXIMIZED})
 	rl.InitWindow(WINDOW_W, WINDOW_H, "Asteroids")
 	rl.SetWindowPosition(50, 150)
-	rl.SetTargetFPS(60)
+	rl.SetTargetFPS(PHYSICS_HZ)
 	rl.SetExitKey(nil)
     rl.InitAudioDevice()
 }
@@ -544,7 +504,8 @@ game_init :: proc() {
     context.logger = log.create_console_logger()
 	g_mem = new(Game_Memory)
 	g_mem.manager = new(Entity_Manager)
-	g_mem.manager.components = new(Components(MAX_ENTITIES))
+	g_mem.manager.components = new(#soa[MAX_ENTITIES]Big_Component)
+    components = g_mem.manager.components
     for sound_kind in Sound_Kind {
         g_mem.sounds[sound_kind] = load_sound_from_kind(sound_kind)
     }
@@ -594,6 +555,7 @@ game_init :: proc() {
     init_ufo_vertices()
     init_ship_vertices()
     init_ship_thrust_vertices()
+
     touch_area = {0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
     current_gesture = nil
     last_gesture = nil
@@ -601,9 +563,55 @@ game_init :: proc() {
 	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
     g_mem.player_id = player_id
 
-
 	game_hot_reloaded(g_mem)
 }
+
+// clear and init
+reset_gameplay_data :: proc() {
+    // Reset globals
+    g_mem.player_id = 0
+    g_mem.run = true
+    g_mem.ship_state = .Normal
+    g_mem.game_state = .Intro
+    g_mem.score = 0
+    g_mem.lives = 3
+    g_mem.extra_life_count = 0
+    g_mem.beat_level = 0
+    g_mem.ship_active_bullets = 0
+    g_mem.is_beat_sound_hi = false
+    g_mem.is_thrust_drawing = false
+    g_mem.ship_active_bullets = 0
+    g_mem.level = 1
+
+    restart_timer(&g_mem.death_timer)
+    restart_timer(&g_mem.spawn_timer)
+    restart_timer(&g_mem.between_levels_timer)
+    restart_timer(&g_mem.beat_level_timer)
+    restart_timer(&g_mem.ufo_timer)
+    restart_timer(&g_mem.thrust_draw_timer)
+    restart_timer(&g_mem.teleport_timer)
+    restart_timer(&g_mem.intro_timer)
+
+    // because the interval evolves over time
+    g_mem.beat_sound_timer = Timer {
+        accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
+        interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
+    }
+
+    // Reset Entity Manager
+    free(g_mem.manager.components)
+    free(g_mem.manager)
+    g_mem.manager = new(Entity_Manager)
+	g_mem.manager.components = new(#soa[MAX_ENTITIES]Big_Component)
+    current_gesture = nil
+    last_gesture = nil
+
+	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
+    g_mem.player_id = player_id
+
+    components = g_mem.manager.components
+}
+
 
 @(export)
 game_hot_reloaded :: proc(mem: rawptr) { 
@@ -663,10 +671,10 @@ game_parent_window_size_changed :: proc(w, h: int) {
 draw_entities :: proc() {
     dt := rl.GetFrameTime()
     for index in 0..<get_active_entity_count() {
-        pos := get_position(index)
-        rot := get_rotation(index)
+        pos := components[index].position
+        rot := components[index].rotation
+        entity_type := components[index].type
 
-        entity_type := get_entity_type(index)
         switch entity_type {
         case .Ship:
             switch g_mem.ship_state {
@@ -682,15 +690,15 @@ draw_entities :: proc() {
             case .Teleporting:
             }
         case .Asteroid_Small, .Asteroid_Medium, .Asteroid_Large:
-            radius := get_radius_physics(index)
+            radius := components[index].radius
             draw_asteroid(pos, rot, radius)
         case .Bullet:
             draw_bullet(pos)
         case .Ufo_Big, .Ufo_Small:
             draw_ufo(pos, entity_type)
             if DEBUG {
-                physics_radius := get_radius_physics(index)
-                 rl.DrawCircleLinesV(pos, physics_radius, rl.BLUE)
+                radius := components[index].radius
+                 rl.DrawCircleLinesV(pos, radius, rl.BLUE)
             }
         case .None:
         }
@@ -864,7 +872,7 @@ draw_ship :: proc(pos: Vec2, rot: f32, scale: f32 = 1) {
 
     if DEBUG {
         rl.DrawPixelV(pos, rl.RAYWHITE)
-        radius := get_radius_physics(get_player_index())
+        radius := components[get_player_index()].radius
         rl.DrawCircleLinesV(pos, radius, rl.BLUE)
     }
 }
@@ -930,7 +938,6 @@ create_entity :: proc(entity_type: Entity_Type) -> Entity_Id {
     }
     sa.append(&manager.entities, id)
     g_mem.manager.n_active += 1
-    set_entity_type(index, entity_type)
     manager.entity_to_index[id] = index
     return id
 }
@@ -945,11 +952,10 @@ destroy_entity :: proc(index_to_destroy: int) {
         return
     }
     // Get the last active entity. n_active--
-    type, swap_data, last_id, last_index_before_pop := _pop_back_entity()
+    swap_data, last_id, last_index_before_pop := _pop_back_entity()
 
     // Swap components only if entity_destroyed isn't last entity
     if index_to_swap != last_index_before_pop {
-        set_entity_type(index_to_swap, type)
         set_component_data(id_to_destroy, swap_data)
     }
 
@@ -959,131 +965,45 @@ destroy_entity :: proc(index_to_destroy: int) {
     delete_key(&manager.entity_to_index, id_to_destroy)
 }
 
-_pop_back_entity :: proc() -> (Entity_Type, Component_Data, Entity_Id, int) {
+_pop_back_entity :: proc() -> (Big_Component, Entity_Id, int) {
     last_index := get_last_entity_index()
-    type := get_entity_type(last_index)
     last_id := sa.pop_back(&g_mem.manager.entities)
     g_mem.manager.n_active -= 1
-    data := Component_Data{
-        position = g_mem.manager.positions[last_index],
-        velocity = g_mem.manager.velocities[last_index],
-        rotation = g_mem.manager.rotations[last_index],
-        radius_physics = g_mem.manager.radii_physics[last_index],
-        lifespan = g_mem.manager.lifespans[last_index],
-        visual_rotation_rate = g_mem.manager.visual_rotation_rates[last_index],
-        move_timer = g_mem.manager.move_timers[last_index],
-        shot_timer = g_mem.manager.shot_timers[last_index],
-        shooter = g_mem.manager.shooters[last_index],
+    data := Big_Component{
+        type = g_mem.manager.components[last_index].type,
+        position = g_mem.manager.components[last_index].position,
+        velocity = g_mem.manager.components[last_index].velocity,
+        rotation = g_mem.manager.components[last_index].rotation,
+        radius = g_mem.manager.components[last_index].radius,
+        lifespan = g_mem.manager.components[last_index].lifespan,
+        visual_rotation_rate = g_mem.manager.components[last_index].visual_rotation_rate,
+        move_timer = g_mem.manager.components[last_index].move_timer,
+        shot_timer = g_mem.manager.components[last_index].shot_timer,
+        shooter = g_mem.manager.components[last_index].shooter,
     }
-    return type, data, last_id, last_index
+    return data, last_id, last_index
 }
 
-
-// NOTE: remember to update this component code for every new component!
-Component_Data :: struct {
-    position: Vec2,
-    velocity: Vec2,
-    rotation: f32,
-    radius_physics: f32,
-    lifespan: f32,
-    visual_rotation_rate: f32,
-    move_timer: Timer,
-    shot_timer: Timer,
-    shooter: Shooter_Type,
-}
-
-get_component_data :: proc(id: Entity_Id) -> Component_Data {
-    index, ok := g_mem.manager.entity_to_index[id]
-    if !ok {
-        s := fmt.aprintf("Failed to spawn bullet, no index mapped to id:", id)
-        log.warn(s)
-        return {}
-    }
-    return Component_Data{
-        position = g_mem.manager.components.positions[index],
-        velocity = g_mem.manager.components.velocities[index],
-        rotation = g_mem.manager.components.rotations[index],
-        radius_physics = g_mem.manager.components.radii_physics[index],
-        lifespan = g_mem.manager.components.lifespans[index],
-        visual_rotation_rate = g_mem.manager.components.visual_rotation_rates[index],
-        move_timer = g_mem.manager.components.move_timers[index],
-        shot_timer = g_mem.manager.components.shot_timers[index],
-        shooter = g_mem.manager.components.shooters[index],
-    }
-}
-
-set_component_data :: proc(id: Entity_Id, data: Component_Data) -> bool {
+set_component_data :: proc(id: Entity_Id, data: Big_Component) -> bool {
     idx, ok_idx := g_mem.manager.entity_to_index[id]
     if !ok_idx {
         s := fmt.aprint("Failed to set component data, no index mapped to id:", id)
         log.warn(s)
         return false
     }
-    set_position(idx, data.position)
-    set_velocity(idx, data.velocity)
-    set_physics_radius(idx, data.radius_physics)
-    set_rotation(idx, data.rotation)
-    set_lifespan(idx, data.lifespan)
-    set_visual_rotation_rate(idx, data.visual_rotation_rate)
-    set_move_timer(idx, data.move_timer)
-    set_shot_timer(idx, data.shot_timer)
-    set_shooter(idx, data.shooter)
+    components[idx] = {
+        type = data.type,
+        position = data.position,
+        velocity = data.velocity,
+        radius = data.radius,
+        rotation = data.rotation,
+        lifespan = data.lifespan,
+        visual_rotation_rate = data.visual_rotation_rate,
+        move_timer = data.move_timer,
+        shot_timer = data.shot_timer,
+        shooter = data.shooter,
+    }
     return true
-}
-
-get_position :: proc(idx: int) -> Vec2 {
-    return g_mem.manager.components.positions[idx]
-}
-get_velocity :: proc(idx: int) -> Vec2 {
-    return g_mem.manager.components.velocities[idx]
-}
-get_rotation :: proc(idx: int) -> f32 {
-    return g_mem.manager.components.rotations[idx]
-}
-get_lifespan :: proc(idx: int) -> f32 {
-    return g_mem.manager.components.lifespans[idx]
-}
-get_visual_rotation_rate :: proc(idx: int) -> f32 {
-    return g_mem.manager.components.visual_rotation_rates[idx]
-}
-get_move_timer :: proc(idx: int) -> Timer {
-    return g_mem.manager.components.move_timers[idx]
-}
-get_shot_timer :: proc(idx: int) -> Timer {
-    return g_mem.manager.components.shot_timers[idx]
-}
-get_shooter :: proc(idx: int) -> Shooter_Type {
-    return g_mem.manager.components.shooters[idx]
-}
-get_radius_physics :: proc(idx: int) -> f32 {
-    return g_mem.manager.components.radii_physics[idx]
-}
-set_position :: proc(idx: int, val: Vec2) {
-    g_mem.manager.components.positions[idx] = val
-}
-set_velocity :: proc(idx: int, val: Vec2) {
-    g_mem.manager.components.velocities[idx] = val
-}
-set_rotation :: proc(idx: int, val: f32) {
-    g_mem.manager.components.rotations[idx] = val
-}
-set_physics_radius :: proc(idx: int, val: f32) {
-    g_mem.manager.components.radii_physics[idx] = val
-}
-set_lifespan :: proc(idx: int, val: f32) {
-    g_mem.manager.components.lifespans[idx] = val
-}
-set_visual_rotation_rate :: proc(idx: int, val: f32) {
-    g_mem.manager.components.visual_rotation_rates[idx] = val
-}
-set_move_timer :: proc(idx: int, val: Timer) {
-    g_mem.manager.components.move_timers[idx] = val
-}
-set_shot_timer :: proc(idx: int, val: Timer) {
-    g_mem.manager.components.shot_timers[idx] = val
-}
-set_shooter :: proc(idx: int, val: Shooter_Type) {
-    g_mem.manager.components.shooters[idx] = val
 }
 
 update_ship :: proc(index: int) {
@@ -1095,8 +1015,8 @@ update_ship :: proc(index: int) {
                 set_game_over()
             } else {
                 g_mem.ship_state = .Spawning
-                set_position(get_player_index(), Vec2{0,0})
-                set_rotation(index, math.to_radians(f32(-90)))
+                components[get_player_index()].position = {}
+                components[index].rotation = math.to_radians(f32(-90))
             }
         }
     case .Teleporting:
@@ -1104,7 +1024,7 @@ update_ship :: proc(index: int) {
             rgn_pos_x := rand.float32_range(-0.4, 0.4) * f32(play_span_x())
             rgn_pos_y := rand.float32_range(-0.4, 0.4) * f32(play_span_y())
             new_pos := Vec2{rgn_pos_x, rgn_pos_y}
-            set_position(index, new_pos)
+            components[index].position = new_pos
             g_mem.ship_state = .Normal
         }
     case .Spawning, .Normal:
@@ -1113,12 +1033,10 @@ update_ship :: proc(index: int) {
                 g_mem.ship_state = .Normal
             }
         }
-
         if rl.IsKeyPressed(.LEFT_SHIFT) || rl.IsKeyPressed(.RIGHT_SHIFT)  {
             g_mem.ship_state = .Teleporting
-            set_velocity(index, {})
+            components[index].velocity = {}
         }
-
         is_thrusting := rl.IsKeyDown(.UP) || rl.IsKeyDown(.W) || g_mem.is_gesture_hold
         if is_thrusting {
             if process_timer(&g_mem.thrust_draw_timer) {
@@ -1153,11 +1071,11 @@ update_ship :: proc(index: int) {
             }
         }
 
-        rot := get_rotation(index)
+        rot := components[index].rotation
         new_rot := rot + d_rot * dt
-        set_rotation(index, new_rot)
+        components[index].rotation = new_rot
 
-        vel := get_velocity(index)
+        vel := components[index].velocity
         new_vel := vel
         if !is_thrusting {
             new_vel -= new_vel * SPACE_FRICTION_COEFFICIENT
@@ -1176,7 +1094,7 @@ update_ship :: proc(index: int) {
             new_vel = Vec2{}
         }
 
-        set_velocity(index, new_vel)
+        components[index].velocity = new_vel
     }
 }
 
@@ -1188,36 +1106,35 @@ update_entities :: proc( dt: f32) {
 	for index in 0..<n_active_entities {
 
         // Entity Autonomous Behavior
-        entity_type := get_entity_type(index)
-        id := get_entity_id(index)
-        data := get_component_data(id)
+        entity_type := components[index].type
         switch entity_type {
 		case .Ship:
             update_ship(index)
 		case .Asteroid_Small, .Asteroid_Medium, .Asteroid_Large:
-            rot := data.rotation
-            visual_rotation_rate := data.visual_rotation_rate
+            rot := components[index].rotation
+            visual_rotation_rate := components[index].visual_rotation_rate
             new_rot := rot + visual_rotation_rate
-            set_rotation(index, new_rot)
+            components[index].rotation = new_rot
 		case .Bullet:
         case .Ufo_Big, .Ufo_Small:
             if !rl.IsSoundPlaying(g_mem.sounds[.Ufo_Alarm]) {
                 rl.PlaySound(g_mem.sounds[.Ufo_Alarm])
             }
-            vel := get_velocity(index)
-            move_timer := get_move_timer(index)
+
+            vel := components[index].velocity
+            move_timer := components[index].move_timer
             process_ufo_move(index, dt, move_timer, vel, entity_type)
 
-            shot_timer := get_shot_timer(index)
-            pos := get_position(index)
+            shot_timer := components[index].shot_timer
+            pos := components[index].position
             process_ufo_shot(index, dt, shot_timer, entity_type, pos)
         case .None:
 		}
 
-        pos := get_position(index)
-        vel := get_velocity(index)
+        pos := components[index].position
+        vel := components[index].velocity
         new_pos := pos + vel * dt
-        set_position(index, new_pos)
+        components[index].position = new_pos
 
         if (entity_type == .Ufo_Small || entity_type == .Ufo_Big) && is_out_of_bounds_x(new_pos) {
             append(&entities_to_destroy_behavioral, index)
@@ -1226,21 +1143,21 @@ update_entities :: proc( dt: f32) {
         // Wraparound
         if new_pos.x <= f32(play_edge_left()) {
             dx := f32(play_edge_left()) - new_pos.x
-            set_position(index, {f32(play_edge_right()) - dx, new_pos.y})
+            components[index].position = {f32(play_edge_right()) - dx, new_pos.y}
         } else if new_pos.x >= f32(play_edge_right()) {
             dx := new_pos.x - f32(play_edge_right())
-            set_position(index, {f32(play_edge_left()) + dx, new_pos.y})
+            components[index].position = {f32(play_edge_left()) + dx, new_pos.y}
         }
         if new_pos.y <= f32(play_edge_top()) {
             dy := f32(play_edge_top()) - new_pos.y
-            set_position(index, {new_pos.x, f32(play_edge_bottom()) - dy})
+            components[index].position = {new_pos.x, f32(play_edge_bottom()) - dy}
         } else if new_pos.y >= f32(play_edge_bottom()) {
             dy := new_pos.y - f32(play_edge_bottom())
-            set_position(index, {new_pos.x, f32(play_edge_top()) + dy})
+            components[index].position = {new_pos.x, f32(play_edge_top()) + dy}
         }
     }
     for index_to_destroy in entities_to_destroy_behavioral {
-        if get_shooter(index_to_destroy) == .Ship {
+        if components[index_to_destroy].shooter == .Ship {
             g_mem.ship_active_bullets -= 1
         }
         destroy_entity(index_to_destroy)
@@ -1277,18 +1194,18 @@ handle_collisions :: proc() {
             }
             if is_destroyed_b do continue
 
-            pos_a := get_position(index_a)
-            pos_b := get_position(index_b)
-            radius_a := get_radius_physics(index_a)
-            radius_b := get_radius_physics(index_b)
+            pos_a := components[index_a].position
+            pos_b := components[index_b].position
+            radius_a := components[index_a].radius
+            radius_b := components[index_b].radius
 
             if !rl.CheckCollisionCircles(pos_a, radius_a, pos_b, radius_b) {
                 continue
             }
 
             // check is pair of entities specified, return as such
-            type_a := get_entity_type(index_a)
-            type_b := get_entity_type(index_b)
+            type_a := components[index_a].type
+            type_b := components[index_b].type
 
             is_some_ship := type_a == .Ship || type_b == .Ship
             is_some_bullet := type_a == .Bullet || type_b == .Bullet
@@ -1301,15 +1218,15 @@ handle_collisions :: proc() {
 
                 switch other_type {
                 case .Asteroid_Large, .Asteroid_Medium, .Asteroid_Small:
-                    aster_position := get_position(other_index)
+                    aster_position := components[other_index].position
                     kill_asteroid(&asteroids_to_spawn, &entities_to_destroy, other_type, other_index, .Ship,  aster_position)
                     kill_ship()
                 case .Ufo_Big, .Ufo_Small:
-                    ufo_position := get_position(other_index)
+                    ufo_position := components[other_index].position
                     kill_ufo(&entities_to_destroy, other_type, other_index, ufo_position, .Ship)
                     kill_ship()
                 case .Bullet:
-                    if get_shooter(other_index) == .Ship {
+                    if components[other_index].shooter == .Ship {
                         continue
                     } else {
                         append(&entities_to_destroy, other_index)
@@ -1338,8 +1255,8 @@ handle_collisions :: proc() {
 
                 aster_index := is_type_a_bullet ? index_b : index_a
                 aster_type := is_type_a_bullet ? type_b : type_a
-                aster_position := get_position(aster_index)
-                shooter := get_shooter(bullet_index)
+                aster_position := components[aster_index].position
+                shooter := components[bullet_index].shooter
                 kill_asteroid(&asteroids_to_spawn, &entities_to_destroy, aster_type, aster_index, shooter,  aster_position)
                 continue
             }
@@ -1352,8 +1269,8 @@ handle_collisions :: proc() {
                 bullet_index := is_type_a_bullet ? index_a : index_b
                 ufo_index := is_type_a_bullet ? index_b : index_a
                 ufo_type := is_type_a_bullet ? type_b : type_a
-                ufo_position := get_position(ufo_index)
-                shooter := get_shooter(bullet_index)
+                ufo_position := components[ufo_index].position
+                shooter := components[bullet_index].shooter
                 if shooter == .Ship {
                     append(&entities_to_destroy, bullet_index)
                     kill_ufo(&entities_to_destroy, ufo_type, ufo_index, ufo_position, shooter)
@@ -1365,10 +1282,10 @@ handle_collisions :: proc() {
                 is_type_a_ufo := type_a == .Ufo_Small || type_a == .Ufo_Big
                 ufo_type := is_type_a_ufo ? type_a : type_b
                 ufo_index := is_type_a_ufo ? index_a : index_b
-                ufo_position := get_position(ufo_index)
+                ufo_position := components[ufo_index].position
                 aster_index := is_type_a_ufo ? index_b : index_a
                 aster_type := is_type_a_ufo ? type_b : type_a
-                aster_position := get_position(aster_index)
+                aster_position := components[aster_index].position
                 kill_ufo(&entities_to_destroy, ufo_type, ufo_index, ufo_position, .None)
                 kill_asteroid(&asteroids_to_spawn, &entities_to_destroy, aster_type, aster_index, .None,  aster_position)
                 continue
@@ -1377,7 +1294,7 @@ handle_collisions :: proc() {
     }
 
     for index_to_destroy in entities_to_destroy {
-        if get_shooter(index_to_destroy) == .Ship {
+        if components[index_to_destroy].shooter == .Ship {
             g_mem.ship_active_bullets -= 1
         }
         destroy_entity(index_to_destroy)
@@ -1392,36 +1309,36 @@ kill_ship :: proc() {
     if !rl.IsSoundPlaying(g_mem.sounds[.Death]) {
         rl.PlaySound(g_mem.sounds[.Death])
     }
-    set_velocity(get_player_index(), Vec2{0,0})
+    components[get_player_index()].velocity = {}
     g_mem.lives -= 1
     g_mem.ship_state = .Death
 }
 
-kill_asteroid :: proc(asteroids_to_spawn: ^[dynamic]Spawn_Asteroid_Data, entities_to_destroy: ^[dynamic]int, type: Entity_Type, aster_index: int, shooter: Shooter_Type, aster_position: Vec2) {
+kill_asteroid :: proc(asteroids_to_spawn: ^[dynamic]Spawn_Asteroid_Data, entities_to_destroy: ^[dynamic]int, type: Entity_Type, index: int, shooter: Shooter_Type, position: Vec2) {
     rl.PlaySound(g_mem.sounds[.Asteroid_Explode])
     #partial switch type {
     case .Asteroid_Small:
         if shooter == .Ship do increment_score(100)
     case .Asteroid_Medium:
         if shooter == .Ship do increment_score(50)
-        aster_velocity := get_velocity(aster_index)
-        vel_a := jiggle_asteroid_velocity(aster_velocity, 1.5)
-        vel_b := jiggle_asteroid_velocity(aster_velocity, 1.5)
-        vel_c := jiggle_asteroid_velocity(aster_velocity, 1.5)
-        small_positions := spawn_positions_destroyed_medium_asteroid(aster_position, aster_velocity)
+        vel := components[index].velocity
+        vel_a := jiggle_asteroid_velocity(vel, 1.5)
+        vel_b := jiggle_asteroid_velocity(vel, 1.5)
+        vel_c := jiggle_asteroid_velocity(vel, 1.5)
+        small_positions := spawn_positions_destroyed_medium_asteroid(position, vel)
         append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[0], vel = vel_a})
         append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[1], vel = vel_b})
         append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Small, pos = small_positions[2], vel = vel_c})
     case .Asteroid_Large:
         if shooter == .Ship do increment_score(20)
-        aster_velocity := get_velocity(aster_index)
-        vel_a := jiggle_asteroid_velocity(aster_velocity)
-        vel_b := jiggle_asteroid_velocity(aster_velocity)
-        med_positions := spawn_positions_destroyed_large_asteroid (aster_position, aster_velocity)
+        vel := components[index].velocity
+        vel_a := jiggle_asteroid_velocity(vel)
+        vel_b := jiggle_asteroid_velocity(vel)
+        med_positions := spawn_positions_destroyed_large_asteroid (position, vel)
         append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[0], vel = vel_a})
         append(asteroids_to_spawn, Spawn_Asteroid_Data{ type = .Asteroid_Medium, pos = med_positions[1], vel = vel_b})
     }
-    append(entities_to_destroy, aster_index)
+    append(entities_to_destroy, index)
 }
 
 kill_ufo :: proc (entities_to_destroy: ^[dynamic]int, ufo_type: Entity_Type, ufo_index: int, ufo_position: Vec2, shooter: Shooter_Type) {
@@ -1434,14 +1351,6 @@ kill_ufo :: proc (entities_to_destroy: ^[dynamic]int, ufo_type: Entity_Type, ufo
         }
     }
     append(entities_to_destroy, ufo_index)
-}
-
-get_entity_type :: proc(idx: int) -> Entity_Type {
-    return g_mem.manager.types[idx]
-}
-
-set_entity_type :: proc(idx: int, type: Entity_Type) {
-    g_mem.manager.types[idx] = type
 }
 
 draw_asteroid :: proc(pos: Vec2, rot: f32, radius: f32) {
@@ -1478,7 +1387,7 @@ draw_ui :: proc() {
 }
 
 draw_debug_ui :: proc() {
-    vel := get_velocity(0)
+    vel := components[get_player_index()].velocity
     speed := linalg.length(vel)
     if DEBUG {
         rl.DrawText(
@@ -1491,7 +1400,7 @@ draw_debug_ui :: proc() {
                 LOGICAL_W,
                 rl.GetFrameTime(),
                 rl.GetTime(),
-                get_position(0),
+                components[0].position,
                 vel,
                 speed,
                 get_active_entity_count(),
@@ -1552,52 +1461,6 @@ screen_bottom :: proc() -> f32 {
 
 pr_span :: proc(msg: Maybe(string)) {
     pr("-----------------------", msg.? or_else "", "-----------------------")
-}
-
-spawn_ship :: proc(pos: Vec2, rot: f32) -> Entity_Id {
-    id := create_entity(.Ship)
-    set_component_data(id, Component_Data{
-        position = pos,
-        rotation = rot,
-        velocity = Vec2{0, 0},
-        radius_physics = SHIP_R,
-    })
-    return id
-}
-
-spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2) {
-    id := create_entity(entity_type)
-    visual_rotation_rate := rand.float32_range(-2, 2)
-    radius: f32
-    #partial switch entity_type {
-    case .Asteroid_Small:
-        radius = SMALL_ASTEROID_RADIUS
-    case .Asteroid_Medium:
-        radius = MEDIUM_ASTEROID_RADIUS
-    case .Asteroid_Large:
-        radius = LARGE_ASTEROID_RADIUS
-    }
-    data_in := Component_Data{
-        position = pos,
-        velocity = vel,
-        radius_physics = radius,
-        visual_rotation_rate = visual_rotation_rate,
-    }
-    set_component_data(id, data_in)
-}
-
-spawn_bullet_from_ship :: proc() {
-    data := get_component_data(get_player_id())
-
-    ship_rotation := data.rotation
-    rotation_vector := angle_radians_to_vec(ship_rotation)
-    ship_position := data.position
-
-    bullet_position := ship_position + rotation_vector * SHIP_R
-    velocity := rotation_vector * BULLET_SPEED
-
-    g_mem.ship_active_bullets += 1
-    spawn_bullet(bullet_position, velocity, .Ship)
 }
 
 angle_radians_to_vec :: proc(rot: f32) -> Vec2 {
@@ -1729,51 +1592,6 @@ is_timer_done :: proc(timer: Timer) -> bool {
     return timer.accum <= 0
 }
 
-// clear and init
-reset_gameplay_data :: proc() {
-    // Reset globals
-    g_mem.player_id = 0
-    g_mem.run = true
-    g_mem.ship_state = .Normal
-    g_mem.game_state = .Intro
-    g_mem.score = 0
-    g_mem.lives = 3
-    g_mem.extra_life_count = 0
-    g_mem.beat_level = 0
-    g_mem.ship_active_bullets = 0
-    g_mem.is_beat_sound_hi = false
-    g_mem.is_thrust_drawing = false
-    g_mem.ship_active_bullets = 0
-    g_mem.level = 1
-
-    restart_timer(&g_mem.death_timer)
-    restart_timer(&g_mem.spawn_timer)
-    restart_timer(&g_mem.between_levels_timer)
-    restart_timer(&g_mem.beat_level_timer)
-    restart_timer(&g_mem.ufo_timer)
-    restart_timer(&g_mem.thrust_draw_timer)
-    restart_timer(&g_mem.teleport_timer)
-    restart_timer(&g_mem.intro_timer)
-
-    // because the interval evolves over time
-    g_mem.beat_sound_timer = Timer {
-        accum = INIT_TIMER_INTERVAL_BEAT_SOUND,
-        interval = INIT_TIMER_INTERVAL_BEAT_SOUND,
-    }
-
-    // Reset Entity Manager
-    free(g_mem.manager.components)
-    free(g_mem.manager)
-    g_mem.manager = new(Entity_Manager)
-	g_mem.manager.components = new(Components(MAX_ENTITIES))
-    current_gesture = nil
-    last_gesture = nil
-
-	player_id := spawn_ship({0,0}, math.to_radians(f32(-90)))
-    g_mem.player_id = player_id
-
-}
-
 update_beat_sound_timer_with_level :: proc(beat_level: i32) {
     g_mem.beat_sound_timer.interval = INIT_TIMER_INTERVAL_BEAT_SOUND * math.pow(0.86, f32(beat_level))
 }
@@ -1803,23 +1621,23 @@ process_ufo_move :: proc(index: int, dt: f32, move_timer: Timer, vel: Vec2, type
             // level
             if rgn < chance_to_move * 0.75 {
                 new_vel := vel.x >= 0 ? Vec2{speed, 0} : Vec2{-speed, 0 }
-                set_velocity(index, new_vel)
+                components[index].velocity = new_vel
 
             // up diag
             } else if rgn < chance_to_move * 0.875 {
                 dir := vel.x >= 0 ? Vec2{1, -1} : Vec2{-1, -1}
                 new_vel :=  dir * speed
-                set_velocity(index, new_vel)
+                components[index].velocity = new_vel
 
             // down diag
             } else if rgn < chance_to_move {
                 dir := vel.x >= 0 ? Vec2{1, 1} : Vec2{-1, 1}
                 new_vel :=  dir * speed
-                set_velocity(index, new_vel)
+                components[index].velocity = new_vel
             }
         }
     }
-    set_move_timer(index, move_timer)
+    components[index].move_timer = move_timer
 }
 
 process_ufo_shot :: proc(index: int, dt: f32, shot_timer: Timer, type: Entity_Type, ufo_pos: Vec2) {
@@ -1830,7 +1648,7 @@ process_ufo_shot :: proc(index: int, dt: f32, shot_timer: Timer, type: Entity_Ty
         if rgn < chance_to_shoot {
 
             // Shot direction
-            player_pos := get_position(get_player_index())
+            player_pos := components[get_player_index()].position
             shot_dir: Vec2
             if type == .Ufo_Big {
                 rgn_dir := rand.float32()
@@ -1845,33 +1663,34 @@ process_ufo_shot :: proc(index: int, dt: f32, shot_timer: Timer, type: Entity_Ty
             rl.PlaySound(g_mem.sounds[.Fire])
         }
     }
-    set_shot_timer(index, shot_timer)
+    components[index].shot_timer = shot_timer
 }
 
 spawn_bullet :: proc(pos: Vec2, vel: Vec2, shooter: Shooter_Type) {
     id := create_entity(.Bullet)
-    data_in := Component_Data{
+    data_in := Big_Component{
+        type = .Bullet,
         position = pos,
         velocity = vel,
         lifespan = BULLET_LIFESPAN,
         shooter = shooter,
-        radius_physics = BULLET_PHYSICS_RADIUS,
+        radius = BULLET_PHYSICS_RADIUS,
     }
     set_component_data(id, data_in)
 }
 
 // Reset all component data to default values
 reset_entity_components :: proc(index: int) {
-    manager := g_mem.manager
-    manager.positions[index] = Vec2{0, 0}
-    manager.velocities[index] = Vec2{0, 0}
-    manager.rotations[index] = 0
-    manager.radii_physics[index] = 0
-    manager.lifespans[index] = 0
-    manager.visual_rotation_rates[index] = 0
-    manager.move_timers[index] = Timer{}
-    manager.shot_timers[index] = Timer{}
-    manager.shooters[index] = .None
+    components[index].type = nil
+    components[index].position = Vec2{0, 0}
+    components[index].velocity = Vec2{0, 0}
+    components[index].rotation = 0
+    components[index].radius = 0
+    components[index].lifespan = 0
+    components[index].visual_rotation_rate = 0
+    components[index].move_timer = Timer{}
+    components[index].shot_timer = Timer{}
+    components[index].shooter = .None
 }
 
 set_game_over :: proc() {
@@ -1896,4 +1715,93 @@ process_timer :: proc(timer: ^Timer) -> (is_done: bool) {
         return true
     }
     return false
+}
+
+spawn_ship :: proc(pos: Vec2, rot: f32) -> Entity_Id {
+    id := create_entity(.Ship)
+    set_component_data(id, Big_Component{
+        type = .Ship,
+        position = pos,
+        rotation = rot,
+        velocity = Vec2{0, 0},
+        radius = SHIP_R,
+    })
+    return id
+}
+
+spawn_asteroid :: proc(entity_type: Entity_Type, pos: Vec2, vel: Vec2) {
+    id := create_entity(entity_type)
+    visual_rotation_rate := rand.float32_range(-2, 2)
+    radius: f32
+    #partial switch entity_type {
+    case .Asteroid_Small:
+        radius = SMALL_ASTEROID_RADIUS
+    case .Asteroid_Medium:
+        radius = MEDIUM_ASTEROID_RADIUS
+    case .Asteroid_Large:
+        radius = LARGE_ASTEROID_RADIUS
+    }
+    data_in := Big_Component{
+        type = entity_type,
+        position = pos,
+        velocity = vel,
+        radius = radius,
+        visual_rotation_rate = visual_rotation_rate,
+    }
+    set_component_data(id, data_in)
+}
+
+spawn_bullet_from_ship :: proc() {
+    player_index := get_player_index()
+
+    ship_rotation := components[player_index].rotation
+    rotation_vector := angle_radians_to_vec(ship_rotation)
+    ship_position := components[player_index].position
+
+    bullet_position := ship_position + rotation_vector * SHIP_R
+    velocity := rotation_vector * BULLET_SPEED
+
+    g_mem.ship_active_bullets += 1
+    spawn_bullet(bullet_position, velocity, .Ship)
+}
+
+spawn_ufo :: proc(entity_type: Entity_Type, pos: Vec2, is_moving_right: bool) {
+    id := create_entity(entity_type)
+    radius: f32
+    move_timer: Timer
+    shot_timer: Timer
+    speed: f32
+    #partial switch entity_type {
+    case .Ufo_Big:
+        radius = BIG_UFO_RADIUS
+        move_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_BIG_MOVE,
+            accum = TIMER_INTERVAL_UFO_BIG_MOVE,
+        }
+        shot_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_BIG_SHOOT,
+            accum = TIMER_INTERVAL_UFO_BIG_SHOOT,
+        }
+        speed = BIG_UFO_SPEED
+    case .Ufo_Small:
+        radius = SMALL_UFO_RADIUS
+        move_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_SMALL_MOVE,
+            accum = TIMER_INTERVAL_UFO_SMALL_MOVE,
+        }
+        shot_timer = Timer{
+            interval = TIMER_INTERVAL_UFO_SMALL_SHOOT,
+            accum = TIMER_INTERVAL_UFO_SMALL_SHOOT,
+        }
+        speed = SMALL_UFO_SPEED
+    }
+    data_in := Big_Component{
+        type = entity_type,
+        position = pos,
+        velocity = is_moving_right ? Vec2{speed,0} : Vec2{-speed,0},
+        radius = radius * 0.8,
+        move_timer = move_timer,
+        shot_timer = shot_timer,
+    }
+    set_component_data(id, data_in)
 }
