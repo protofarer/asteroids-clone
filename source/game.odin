@@ -11,7 +11,7 @@ import "core:log"
 pr :: fmt.println
 Vec2 :: rl.Vector2
 
-DEBUG :: true
+DEBUG :: false
 WINDOW_W :: 1000
 WINDOW_H :: 750
 LOGICAL_W :: 1000
@@ -832,16 +832,6 @@ draw_ship_spawning :: proc(pos: Vec2, rot: f32, dt: f32) {
 draw_ship_death :: proc(pos: Vec2) {
     for i in 0..<len(death_particles_start_positions) {
         t := (g_mem.death_timer.interval - g_mem.death_timer.accum) / g_mem.death_timer.interval
-        pos_x := math.lerp(pos.x + death_particles_start_positions[i].x, pos.x + death_particles_end_positions[i].x, t)
-        pos_y := math.lerp(pos.y + death_particles_start_positions[i].y, pos.y + death_particles_end_positions[i].y, t)
-        rl.DrawPixelV({pos_x, pos_y}, rl.RAYWHITE)
-    }
-}
-
-draw_asteroid_explosion :: proc(pos: Vec2) {
-    timer := components[index].death_timer
-    for i in 0..<len(death_particles_start_positions) {
-        t := (timer.interval - timer.accum) / timer.interval
         pos_x := math.lerp(pos.x + death_particles_start_positions[i].x, pos.x + death_particles_end_positions[i].x, t)
         pos_y := math.lerp(pos.y + death_particles_start_positions[i].y, pos.y + death_particles_end_positions[i].y, t)
         rl.DrawPixelV({pos_x, pos_y}, rl.RAYWHITE)
