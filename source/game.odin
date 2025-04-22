@@ -18,7 +18,7 @@ LOGICAL_W :: 1000
 LOGICAL_H :: 750
 
 PHYSICS_HZ :: 60
-FIXED_DT :: 1 / PHYSICS_HZ
+// FIXED_DT :: 1 / PHYSICS_HZ
 
 MAX_ENTITIES :: 64
 
@@ -233,7 +233,6 @@ update :: proc() {
 		g_mem.run = false
 	}
     process_gestures()
-
     eval_game_over()
     if g_mem.game_state == .Game_Over do return
 
@@ -248,7 +247,7 @@ update :: proc() {
 
     update_entities(dt)
     handle_collisions()
-    update_lifespans()
+    update_lifespans(dt)
 
     if get_score() > (get_extra_life_count() + 1) * 10000 {
         increment_extra_life_count()
@@ -317,14 +316,14 @@ level_spawn_and_transition :: proc() {
     }
 }
 
-update_lifespans :: proc() {
+update_lifespans :: proc(dt: f32) {
     bullets_with_expired_lifespans: [dynamic]int
     defer delete(bullets_with_expired_lifespans)
     for index in 0..<get_active_entity_count() {
         type := components[index].type
         if type == .Bullet {
             lifespan := components[index].lifespan
-            new_lifespan := lifespan - rl.GetFrameTime()
+            new_lifespan := lifespan - dt
             if new_lifespan <= 0 {
                 append(&bullets_with_expired_lifespans, index)
             } else {
@@ -346,12 +345,10 @@ spawner_ufo :: proc(beat_level: i32, dt: f32) {
     if !process_timer(&g_mem.ufo_timer) {
         return
     }
-    // restart_timer(&g_mem.ufo_timer)
 
     base_chance_big : f32 = BASE_CHANCE_SPAWN_BIG
     big_spawn_factor := base_chance_big * (1 + f32(beat_level) * 0.07)
 
-    // 1/5 chance to spawn small at beat_level == 1
     base_chance_small : f32 = BASE_CHANCE_SPAWN_SMALL
     small_spawn_factor := base_chance_small * (1 + f32(beat_level) * 0.07)
 
@@ -456,7 +453,7 @@ draw :: proc() {
 	rl.EndDrawing()
 }
 
-// Screen edges are all within play area. The drawn boundary line currently within of play area
+// Screen edges are all within play area. The drawn boundary line currently within play area
 play_edge_left :: proc() -> i32 {
     return i32(screen_left() + 1)
 }
@@ -499,8 +496,8 @@ game_init_window :: proc() {
 
 @(export)
 game_init :: proc() {
-    log.info("init game")
     context.logger = log.create_console_logger()
+    log.info("init game")
 	g_mem = new(Game_Memory)
 	g_mem.manager = new(Entity_Manager)
 	g_mem.manager.components = new(#soa[MAX_ENTITIES]Big_Component)
@@ -1609,9 +1606,8 @@ process_ufo_move :: proc(index: int, dt: f32, move_timer: Timer, vel: Vec2, type
             } else if type == .Ufo_Small {
                 speed = SMALL_UFO_SPEED
             }
-            // bias direction to level. direction based on ratio, avoid rolling again
+            // bias direction to level flight. direction based on ratio, avoid rolling again
             // 75% level, 12.5 up/down
-            // level
             if rgn < chance_to_move * 0.75 {
                 new_vel := vel.x >= 0 ? Vec2{speed, 0} : Vec2{-speed, 0 }
                 components[index].velocity = new_vel
@@ -1672,18 +1668,9 @@ spawn_bullet :: proc(pos: Vec2, vel: Vec2, shooter: Shooter_Type) {
     set_component_data(id, data_in)
 }
 
-// Reset all component data to default values
+// Reset component values
 reset_entity_components :: proc(index: int) {
-    components[index].type = nil
-    components[index].position = Vec2{0, 0}
-    components[index].velocity = Vec2{0, 0}
-    components[index].rotation = 0
-    components[index].radius = 0
-    components[index].lifespan = 0
-    components[index].visual_rotation_rate = 0
-    components[index].move_timer = Timer{}
-    components[index].shot_timer = Timer{}
-    components[index].shooter = .None
+    components[index] = {}
 }
 
 set_game_over :: proc() {
