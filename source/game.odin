@@ -122,7 +122,6 @@ Timer :: struct {
 
 Sound_Kind :: enum {
     Fire,
-    Harm,
     Score,
     Bullet_Impact,
     Thrust,
@@ -839,6 +838,16 @@ draw_ship_death :: proc(pos: Vec2) {
     }
 }
 
+draw_asteroid_explosion :: proc(pos: Vec2) {
+    timer := components[index].death_timer
+    for i in 0..<len(death_particles_start_positions) {
+        t := (timer.interval - timer.accum) / timer.interval
+        pos_x := math.lerp(pos.x + death_particles_start_positions[i].x, pos.x + death_particles_end_positions[i].x, t)
+        pos_y := math.lerp(pos.y + death_particles_start_positions[i].y, pos.y + death_particles_end_positions[i].y, t)
+        rl.DrawPixelV({pos_x, pos_y}, rl.RAYWHITE)
+    }
+}
+
 init_ship_vertices :: proc() {
     r : f32 = SHIP_R
     s : f32 = r * 1.63 // side length
@@ -1471,8 +1480,6 @@ load_sound_from_kind :: proc(kind: Sound_Kind) -> rl.Sound {
         file = "shot-light.wav"
     case .Thrust:
         file = "thrust.wav"
-    case .Harm:
-        file = "damage-ship.wav"
     case .Score:
         file = "score.wav"
     case .Bullet_Impact:
